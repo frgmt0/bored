@@ -265,6 +265,14 @@ export class StageManager {
     await this.reconcile(ref);
   }
 
+  /** Reap live seats during SIGINT/SIGTERM without leaving child groups behind. */
+  async shutdown(reason = "tracker_shutdown"): Promise<void> {
+    for (const ref of new Set([...this.seats.values()].map((seat) => seat.ref))) {
+      await this.abortAllSeats(ref, reason);
+      this.scheduler.evictRun(ref);
+    }
+  }
+
   async cancel(ref: string, reason?: string): Promise<void> {
     const run = this.fold(ref);
     if (run.status === "done" || run.status === "cancelled") {
@@ -278,6 +286,7 @@ export class StageManager {
       ...(reason !== undefined ? { reason } : {}),
       totals: this.totals(folded),
     });
+    this.cleanupTerminalWorktrees(ref);
   }
 
   /** Human verdict on a gate without the resume ceremony (concierge sugar). */
@@ -356,6 +365,24 @@ export class StageManager {
       case "file_change":
       case "stalled":
         return; // in-memory lease state; the Sentinel's sweep rolls it up
+      case "error":
+        this.append(ref, {
+          type: "error_recorded",
+          code: ev.code,
+          message: ev.message,
+          seatKey,
+          operation: "worker_adapter",
+        });
+        return;
+      case "timeout":
+        this.append(ref, {
+          type: "seat_timeout",
+          seatKey,
+          timeoutMs: ev.timeoutMs,
+          reason: ev.reason,
+        });
+        await this.failSeat(ref, seatKey, "synthesized_wall_clock_cap", ev.reason);
+        return;
       case "checkpoint": {
         this.append(ref, { type: "checkpoint_committed", seatKey, sha: ev.sha });
         return;
@@ -378,9 +405,28 @@ export class StageManager {
     const live = this.liveSeat(ref, seatKey);
     if (live) {
       try {
-        await live.handle.abort(reason);
-      } catch {
-        // the process may already be gone
+        const sha = await live.handle.abort(reason);
+        this.append(ref, {
+          type: "seat_aborted",
+          seatKey,
+          reason,
+          ...(sha ? { checkpointSha: sha } : {}),
+        });
+        if (sha) this.append(ref, {
+          type: "checkpoint_committed",
+          seatKey,
+          sha,
+          note: `WIP committed on refusal: ${reason}`,
+        });
+      } catch (err) {
+        this.append(ref, {
+          type: "error_recorded",
+          code: "REFUSAL_ABORT_FAILED",
+          message: err instanceof Error ? err.message : String(err),
+          seatKey,
+          operation: "refusal_abort",
+        });
+        this.append(ref, { type: "seat_aborted", seatKey, reason });
       }
     }
     this.releaseSeat(ref, seatKey);
@@ -421,6 +467,15 @@ export class StageManager {
       signal = ev.signal;
       subtype = "done_signal";
     } else {
+      if (ev.error) {
+        this.append(ref, {
+          type: "error_recorded",
+          code: "WORKER_EXIT_WITHOUT_SIGNAL",
+          message: ev.error,
+          seatKey,
+          operation: "worker_exit",
+        });
+      }
       // Worker process died without a done-signal (§1.6): raise the alarm
       // and synthesize the finished event with the stderr tail.
       this.append(ref, {
@@ -529,6 +584,7 @@ export class StageManager {
       const run = this.fold(ref);
       this.append(ref, { type: "run_done", outcome: "success", totals: this.totals(run) });
       this.scheduler.evictRun(ref);
+      this.cleanupTerminalWorktrees(ref);
       return;
     }
     if (target === EDGE_PARK) {
@@ -1297,6 +1353,13 @@ export class StageManager {
     } catch (err) {
       this.releaseSeat(ref, seatKey);
       this.append(ref, {
+        type: "error_recorded",
+        code: "SPAWN_FAILED",
+        message: err instanceof Error ? err.message : String(err),
+        seatKey,
+        operation: "spawn",
+      });
+      this.append(ref, {
         type: "signal_received",
         seatKey,
         node,
@@ -1339,6 +1402,23 @@ export class StageManager {
     });
   }
 
+  /** Reap terminal isolated worktrees; the task branch remains inspectable. */
+  private cleanupTerminalWorktrees(ref: string): void {
+    for (const seat of Object.values(this.fold(ref).seats)) {
+      try {
+        this.spawner.reap?.(ref, seat.branch);
+      } catch (err) {
+        this.append(ref, {
+          type: "error_recorded",
+          code: "WORKTREE_REAP_FAILED",
+          message: err instanceof Error ? err.message : String(err),
+          seatKey: seat.key,
+          operation: "worktree_reap",
+        });
+      }
+    }
+  }
+
   private releaseSeat(ref: string, seatKey: SeatKey): void {
     this.seats.delete(`${ref}::${seatKey}`);
     this.sentinel.untrack(ref, seatKey);
@@ -1362,21 +1442,36 @@ export class StageManager {
     reason: string,
   ): Promise<void> {
     const live = this.liveSeat(ref, seatKey);
+    let checkpointSha: string | undefined;
     if (live) {
       try {
-        const sha = await live.handle.abort(reason);
-        if (sha) {
+        checkpointSha = await live.handle.abort(reason);
+        if (checkpointSha) {
           this.append(ref, {
             type: "checkpoint_committed",
             seatKey,
-            sha,
+            sha: checkpointSha,
             note: `WIP committed on abort: ${reason}`,
           });
         }
-      } catch {
-        // the process was already gone; the WIP checkpoint is best-effort
+      } catch (err) {
+        // Never swallow an abort failure: the following abort receipt still
+        // makes the state machine recoverable and visible to the operator.
+        this.append(ref, {
+          type: "error_recorded",
+          code: "ABORT_WIP_OR_REAP_FAILED",
+          message: err instanceof Error ? err.message : String(err),
+          seatKey,
+          operation: "abort",
+        });
       }
     }
+    this.append(ref, {
+      type: "seat_aborted",
+      seatKey,
+      reason,
+      ...(checkpointSha ? { checkpointSha } : {}),
+    });
     this.releaseSeat(ref, seatKey);
     const run = this.fold(ref);
     const seatState = run.seats[seatKey];

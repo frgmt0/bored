@@ -93,8 +93,11 @@ A worker is any executable: it gets `BECKETT_MANIFEST` (the §6.4 stage
 manifest, written into `.beckett/stage-manifest.json` in its worktree) and
 `BECKETT_BRIEF`, proves where it is (`worker_ready` with the manifest hash +
 the branch/sha it observes via git), emits progress events on stdout, and
-finishes with a done-signal. A process that dies silently is alarmed,
-retried, and parked by the engine — never lost.
+finishes with a done-signal. Each seat has an enforced execution deadline
+(the worker envelope, or `serve --execution-timeout-ms`), and timeout/abort
+kills its entire detached process group after first making an empty-or-real WIP
+commit. A process that dies silently is alarmed, retried, and parked by the
+engine — never lost.
 
 ## Authoring workflows in JavaScript
 
@@ -233,7 +236,11 @@ Coverage highlights:
 npx run-of-show lint spec.json [--max-workers 8]
 npx run-of-show status  "#42.1" --root ~/.beckett
 npx run-of-show journal "#42.1" --tail 20
+# One clean JSON object per line: ticketRef, runId, timestamp, type,
+# reason, and the event payload. Safe to pipe to jq or an AI operator.
 npx run-of-show events  "#42.1" --tail 20
+# The same structured feed over HTTP:
+curl -s 'http://127.0.0.1:7770/tickets/%2342.1/events?tail=20'
 ```
 
 ## Fidelity notes

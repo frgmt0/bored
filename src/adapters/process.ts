@@ -52,6 +52,8 @@ interface LiveProcess {
   startedAtMs: number;
   finishedDelivered: boolean;
   aborted: boolean;
+  timeout?: NodeJS.Timeout;
+  terminate?: Promise<string>;
   turns: number;
   toolCalls: number;
   tokens: TokenUsage;
@@ -67,7 +69,7 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
     /** provisioning (worktrees, branches, base shas, WIP commits) is git's */
     private readonly git: GitWorktreeSpawnAdapter,
     private readonly command: CommandResolver,
-    private readonly opts: { killGraceMs?: number } = {},
+    private readonly opts: { killGraceMs?: number; executionTimeoutMs?: number } = {},
   ) {}
 
   connect(deliver: Deliver): void {
@@ -93,6 +95,12 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
     while (this.live.size > 0 || (await this.anyChainPending())) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
+  }
+
+  /** Reap every live process group before tracker shutdown. */
+  async shutdown(reason = "tracker_shutdown"): Promise<void> {
+    await Promise.all([...this.live.values()].map((proc) => this.terminate(proc, reason)));
+    await this.drain();
   }
 
   private async anyChainPending(): Promise<boolean> {
@@ -121,6 +129,9 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
         BECKETT_REF: request.ref,
       },
       stdio: ["pipe", "pipe", "pipe"],
+      // A detached child is the leader of a new process group on POSIX. This
+      // lets abort/timeout kill the worker's grandchildren, not just its PID.
+      detached: process.platform !== "win32",
     });
 
     const key = `${request.ref}::${request.seatKey}`;
@@ -135,6 +146,19 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
       tokens: { input: 0, output: 0 },
     };
     this.live.set(key, proc);
+    const timeoutMs = this.opts.executionTimeoutMs ?? request.envelope.wallClockS * 1000;
+    if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+      proc.timeout = setTimeout(() => {
+        void this.terminate(proc, "execution_timeout", timeoutMs).then(() => {
+          this.enqueue(key, proc, {
+            kind: "timeout",
+            timeoutMs,
+            reason: "execution_timeout",
+          });
+        });
+      }, timeoutMs);
+      proc.timeout.unref();
+    }
 
     let buffer = "";
     child.stdout.on("data", (chunk: Buffer) => {
@@ -147,9 +171,21 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
       }
     });
     child.stderr.on("data", () => {
-      /* worker chatter; the done-signal path carries the stderr tail on crash */
+      /* stderr is deliberately not mixed into the structured event feed */
     });
-    child.on("exit", (code) => {
+    child.on("error", (err) => {
+      this.enqueue(key, proc, { kind: "error", code: "SPAWN_PROCESS_ERROR", message: err.message });
+    });
+    child.on("exit", (code, signal) => {
+      if (proc.timeout) clearTimeout(proc.timeout);
+      proc.timeout = undefined;
+      if (code !== 0 && !proc.aborted) {
+        this.enqueue(key, proc, {
+          kind: "error",
+          code: "WORKER_UNEXPECTED_EXIT",
+          message: `worker exited code=${code ?? "null"} signal=${signal ?? "none"}`,
+        });
+      }
       const tail = buffer.trim();
       if (tail) this.handleLine(key, proc, tail);
       if (!proc.finishedDelivered && !proc.aborted) {
@@ -174,17 +210,7 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
           return { receipt: "dropped" as const };
         }
       },
-      abort: async (reason: string) => {
-        proc.aborted = true;
-        void reason;
-        const sha = this.git.commitWip(request.worktree, `WIP: seat aborted`);
-        proc.child.kill("SIGTERM");
-        const grace = this.opts.killGraceMs ?? 3000;
-        setTimeout(() => {
-          if (proc.child.exitCode == null) proc.child.kill("SIGKILL");
-        }, grace).unref();
-        return sha;
-      },
+      abort: async (reason: string) => this.terminate(proc, reason),
       telemetry: () => ({
         turns: proc.turns,
         toolCalls: proc.toolCalls,
@@ -192,6 +218,52 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
         wallClockS: (Date.now() - proc.startedAtMs) / 1000,
       }),
     };
+  }
+
+  /** Commit first, then terminate the complete process group and wait for reaping. */
+  private terminate(proc: LiveProcess, reason: string, timeoutMs?: number): Promise<string> {
+    if (proc.terminate) return proc.terminate;
+    proc.aborted = true;
+    if (proc.timeout) clearTimeout(proc.timeout);
+    proc.timeout = undefined;
+    proc.terminate = (async () => {
+      let sha = "";
+      try {
+        // --allow-empty in the git adapter means even a clean abort has a WIP receipt.
+        sha = this.git.commitWip(proc.request.worktree, `WIP: seat aborted (${reason})`);
+      } catch (err) {
+        this.enqueue(`${proc.request.ref}::${proc.request.seatKey}`, proc, {
+          kind: "error",
+          code: "WIP_COMMIT_FAILED",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      const exited = this.waitForExit(proc.child);
+      this.killProcessGroup(proc.child, "SIGTERM");
+      const grace = this.opts.killGraceMs ?? 3000;
+      if (!(await settlesWithin(exited, grace))) {
+        this.killProcessGroup(proc.child, "SIGKILL");
+        await settlesWithin(exited, 1000);
+      }
+      void timeoutMs;
+      return sha;
+    })();
+    return proc.terminate;
+  }
+
+  private killProcessGroup(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+    if (child.pid == null) return;
+    try {
+      if (process.platform !== "win32") process.kill(-child.pid, signal);
+      else child.kill(signal);
+    } catch {
+      // ESRCH means it already exited; no descendant can remain in its group.
+    }
+  }
+
+  private waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (child.exitCode != null || child.signalCode != null) return Promise.resolve();
+    return new Promise((resolve) => child.once("exit", () => resolve()));
   }
 
   private handleLine(key: string, proc: LiveProcess, line: string): void {
@@ -294,6 +366,13 @@ export function coerceWorkerEvent(data: unknown): WorkerEvent | null {
     default:
       return null;
   }
+}
+
+async function settlesWithin(done: Promise<void>, ms: number): Promise<boolean> {
+  return await Promise.race([
+    done.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
+  ]);
 }
 
 function renderBrief(request: SeatRequest): string {

@@ -66,6 +66,12 @@ export function traceLine(ev: RunEvent): string {
       return `seat ${ev.seatKey}: ${ev.turns} turns, ${ev.filesTouched} files, ${ev.tokens} tokens`;
     case "checkpoint_committed":
       return `checkpoint ${ev.sha.slice(0, 8)}${ev.note ? ` (${ev.note})` : ""}`;
+    case "seat_timeout":
+      return `seat ${ev.seatKey} timed out after ${ev.timeoutMs}ms: ${ev.reason}`;
+    case "seat_aborted":
+      return `seat ${ev.seatKey} aborted: ${ev.reason}${ev.checkpointSha ? ` (WIP ${ev.checkpointSha.slice(0, 8)})` : ""}`;
+    case "error_recorded":
+      return `ERROR [${ev.code}] ${ev.operation}${ev.seatKey ? ` on ${ev.seatKey}` : ""}: ${ev.message}`;
     case "signal_received":
       return `[${ev.node}] signal: ${ev.signal.status} (${ev.subtype}) — ${ev.signal.summary}`;
     case "edge_taken":

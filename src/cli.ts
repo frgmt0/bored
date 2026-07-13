@@ -161,7 +161,10 @@ switch (command) {
     }
     const git = new GitWorktreeSpawnAdapter(repo, systemClock);
     const [cmd, ...cmdArgs] = workerCmd.split(/\s+/);
-    const spawner = new ProcessSpawnAdapter(git, () => ({ cmd: cmd!, args: cmdArgs }));
+    const timeoutMs = arg("--execution-timeout-ms");
+    const spawner = new ProcessSpawnAdapter(git, () => ({ cmd: cmd!, args: cmdArgs }), {
+      ...(timeoutMs ? { executionTimeoutMs: Number(timeoutMs) } : {}),
+    });
     const sink = {
       deliver: (a: Announcement) =>
         console.log(`[${a.severity.toUpperCase()}] → ${a.target}: ${a.text}`),
@@ -172,6 +175,14 @@ switch (command) {
       ownerDM: arg("--owner-dm") ?? "owner",
     });
     spawner.connect((ref, seatKey, ev) => tracker.engine.deliverWorkerEvent(ref, seatKey, ev));
+    let stopping = false;
+    const stop = (signal: "SIGINT" | "SIGTERM") => {
+      if (stopping) return;
+      stopping = true;
+      void tracker.engine.shutdown(`tracker received ${signal}`).then(() => spawner.shutdown(`tracker received ${signal}`)).finally(() => process.exit(0));
+    };
+    process.once("SIGINT", () => stop("SIGINT"));
+    process.once("SIGTERM", () => stop("SIGTERM"));
     void tracker.recover().then(async () => {
       const server = new TrackerServer(tracker);
       const bound = await server.listen(port);
