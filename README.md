@@ -1,12 +1,18 @@
 # run-of-show
 
-A per-task **dynamic workflow engine**, built as an embeddable service
-primitive. It implements the *Run of Show* design proposal (OPS-151 → OPS-152,
-rev 2): instead of one compiled-in ticket lifecycle, every task carries a
-small, validated DAG — the **flow spec** — that a concierge writes at filing
-time. A generic, event-sourced **stage manager** interprets it: stages,
-iteration budgets, parallel fan-out, join rules and human gates are data, not
-dispatcher source.
+A per-task **dynamic workflow engine with a ticket tracker on top** — both
+layers of the *Run of Show* design proposal (OPS-151 → OPS-152, rev 2):
+
+- **the execution layer** (dispatcher replacement): every task carries a
+  small, validated DAG — the **flow spec** — interpreted by a generic,
+  event-sourced **stage manager**. Stages, iteration budgets, parallel
+  fan-out, join rules and human gates are data, not dispatcher source.
+- **the tracker layer** (Plane replacement): a real **ticket entity** on the
+  `#N / #N.x` tree, **cross-task `needs` dependencies** with
+  promote-on-done, the **eight-value state model** (backlog / todo / design /
+  design_review / in_progress / in_review / done / cancelled) projected live
+  from the run record, an **HTTP API + CLI** to drive it all, and a **real
+  agent-spawn adapter** that runs actual worker processes in git worktrees.
 
 The engine holds the design's two reliability invariants:
 
@@ -52,15 +58,88 @@ src/
   engine/stageManager.ts  the interpreter: §4.3's append→fold→decide→gate→act→announce
   adapters/simulated.ts   hand-cranked workers + fake worktrees (tests, simulations)
   adapters/git.ts         real git worktrees, branches and merges
+  adapters/process.ts     REAL workers: child processes + the JSONL driver protocol
+  tracker/ticket.ts    the ticket entity: #N/#N.x refs, needs, states (§1.1/§1.5)
+  tracker/store.ts     tasks.json — the local, locked, versioned registry
+  tracker/tracker.ts   filing, staffing, promote-on-done, state projection
+  server.ts            the HTTP API over the tracker
   presets.ts           Appendix A: today's lifecycles as specs, plus §8 shapes
-  cli.ts               lint / status / journal / events
+  cli.ts               lint/status/journal/events + serve/board/file/nudge/gate/…
 examples/              §7 — the three simulated deployments, runnable
-test/                  122+ tests, unit through end-to-end
+test/                  150+ tests, unit through end-to-end
 ```
 
 Storage layout under the engine root (default `~/.beckett` for the CLI):
 `runs/<ref>.jsonl` (the source of truth), `runs/<ref>.head.json` (cache only),
 `journal/<ref>.log`, `spend.jsonl`.
+
+## Running it as a tracker (server + real workers)
+
+```bash
+# boot the board over a repo; every seat spawns your worker command in its
+# own git worktree, speaking the JSONL driver protocol (adapters/process.ts)
+npx run-of-show serve --root ~/.beckett --repo /path/to/repo \
+  --worker "node my-worker.cjs" --port 7770
+
+# file work over the wire (auto-staffs when its needs are met)
+npx run-of-show file --title "notification prefs API" --body "…" --criteria "stores prefs"
+npx run-of-show file --title "prefs UI" --needs "#1"     # promotes when #1 is done
+npx run-of-show board
+npx run-of-show gate "#1" --node design_review --verdict pass
+npx run-of-show nudge "#1" "prefer the small fix" --node implement
+```
+
+A worker is any executable: it gets `BECKETT_MANIFEST` (the §6.4 stage
+manifest, written into `.beckett/stage-manifest.json` in its worktree) and
+`BECKETT_BRIEF`, proves where it is (`worker_ready` with the manifest hash +
+the branch/sha it observes via git), emits progress events on stdout, and
+finishes with a done-signal. A process that dies silently is alarmed,
+retried, and parked by the engine — never lost.
+
+## Authoring workflows in JavaScript
+
+JSON specs and presets still work, but flows can be *scripted*: a `.js`/
+`.mjs`/`.cjs` file default-exports a function that receives the ticket and
+returns the flow — so the shape is computed for the task at hand instead of
+one rigid structure for everything:
+
+```js
+// adaptive.flow.mjs (full version in examples/flows/)
+export default ({ ticket, flow, presets }) => {
+  if (/hotfix/i.test(ticket.title)) return presets.onePass();
+  const areas = /areas:\s*(.+)/i.exec(ticket.body ?? "")?.[1]?.split(",");
+  if (areas) {
+    return flow()
+      .fanout("split", {
+        arms: areas.map((a) => ({ cast: { harness: "pi", effort: "high" }, brief: `own ${a.trim()}` })),
+        join: "land",
+      })
+      .join("land", { strategy: "all-merge", onPass: "review" })
+      .gate("review", { by: { cast: { harness: "claude", model: "claude-sonnet-5" }, rubric: "criteria-vs-diff" }, onPass: "done" })
+      .budget({ usd: 40 })
+      .build();
+  }
+  return presets.reviewedLifecycle();
+};
+
+// hooks: a scripted concierge with operator authority, per task
+export const hooks = {
+  async onEvent({ event, actions }) {
+    if (event.type === "parked" && event.reason === "max_visits_exhausted") {
+      await actions.resume({ extraVisits: 1 }); // one free extension, then a human owns it
+    }
+  },
+};
+```
+
+File it with `flowScript` (API), `--flow-script` (CLI), or
+`tracker.file({..., flowScript})`. Scripting controls shape and management —
+never the execution guarantees: the returned flow goes through the full
+linter (bounded loops, closed node algebra), hooks run off the event path
+with the same verbs a human concierge has, and budgets/caps still fence
+everything, so scripted flows should set a budget. Hooks are reloaded from
+the stored script path on recovery; hook errors are journalled, never fatal.
+The fluent `flow()` builder is also exported for TypeScript callers.
 
 ## Using it as a primitive
 
@@ -137,6 +216,16 @@ Coverage highlights:
 - **Appendix A equivalence**: OPS reviewed lifecycle, one-pass, and INT design
   flow walk the same stages with the same caps as today's constants
   (`MAX_REWORK_CYCLES`, `MAX_IMPLEMENT_RETRIES`, `MAX_DESIGN_CYCLES`).
+- **Tracker layer**: ref allocation and the one-level tree, needs validation,
+  promote-on-done (single, multiple, and autoStaff:false needs), state
+  projection across all three lifecycles incl. the INT state_map, tracker
+  recovery with missed promotions, and the versioned/locked registry.
+- **Real workers**: an actual node child process handshakes against real git
+  state, commits real output and completes the run; silent exits alarm and
+  re-staff; refusals walk the refusal path; nudges arrive over stdin.
+- **HTTP API**: the full lifecycle driven over the wire (file, staff, nudge,
+  gate verdicts, pause/resume, cancel, deps promotion) with 400/404/409
+  error mapping.
 
 ## CLI
 

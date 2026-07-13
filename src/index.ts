@@ -28,6 +28,17 @@ export * from "./engine/stageManager.js";
 // Adapters
 export * from "./adapters/simulated.js";
 export * from "./adapters/git.js";
+export * from "./adapters/process.js";
+
+// The tracker layer (tickets, cross-task deps, state model) + HTTP API
+export * from "./tracker/ticket.js";
+export * from "./tracker/store.js";
+export * from "./tracker/tracker.js";
+export * from "./server.js";
+
+// Scripted authoring: the fluent builder + .js flow scripts with hooks
+export * from "./authoring/builder.js";
+export * from "./authoring/script.js";
 
 // Appendix A + §8 presets
 export * as presets from "./presets.js";

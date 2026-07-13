@@ -90,6 +90,12 @@ export interface StageManagerOptions {
   blockedModels?: string[];
   ownerDM?: string;
   defaultChannel?: string;
+  /**
+   * Programmatic tap on the event stream, invoked synchronously after each
+   * append + announce. The tracker layer projects ticket states and drives
+   * cross-task promotion from this.
+   */
+  onEvent?: (ref: string, event: RunEvent, run: FlowRun) => void;
 }
 
 export class StageManager {
@@ -99,6 +105,7 @@ export class StageManager {
   readonly herald: Herald;
   private readonly clock: Clock;
   private readonly lintOpts: LintOptions;
+  private readonly onEvent: StageManagerOptions["onEvent"];
   /** live worker handles, keyed ref::seatKey — in-memory only, rebuilt by recovery */
   private seats = new Map<string, LiveSeat>();
   /** runs mid-pause/cancel/fail-fast: signals append but do not advance */
@@ -112,6 +119,7 @@ export class StageManager {
     opts: StageManagerOptions,
   ) {
     this.clock = opts.clock;
+    this.onEvent = opts.onEvent;
     this.store = new RunStore(root);
     this.scheduler = new SeatScheduler(opts.maxWorkers ?? 8);
     this.sentinel = new Sentinel(opts.hardCapS ?? 3600);
@@ -140,6 +148,7 @@ export class StageManager {
     const event = this.store.append(ref, this.now(), input);
     const run = this.store.fold(ref);
     this.herald.announce(ref, event, run);
+    this.onEvent?.(ref, event, run);
     return { event, run };
   }
 

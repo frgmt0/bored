@@ -231,6 +231,19 @@ export function panelReview(k = 2): FlowSpec {
 }
 
 /**
+ * The state_map for the INT design flow (§1.1: "each board carries a
+ * state_map renaming these onto its columns") — run nodes onto the
+ * tracker's eight-value union.
+ */
+export const INT_DESIGN_STATE_MAP: Record<string, "design" | "design_review" | "in_progress" | "in_review"> = {
+  design: "design",
+  design_check: "design",
+  design_review: "design_review",
+  implement: "in_progress",
+  review: "in_review",
+};
+
+/**
  * A flow with no beckett-flow block is compiled from the cast exactly as
  * today (effort → gate), so existing filings never break (§3.2): low/medium
  * effort → self (one pass); high/xhigh/unset → a fresh adversarial review.
