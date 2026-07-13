@@ -1,0 +1,41 @@
+{
+  "name": "run-of-show",
+  "version": "0.1.0",
+  "description": "A per-task dynamic workflow engine (the run of show): concierge-authored flow specs interpreted by a durable, event-sourced stage manager. Service primitive per OPS-152 design rev 2.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cli": "tsx src/cli.ts",
+    "deploy:one-pass": "tsx examples/deploy-one-pass.ts",
+    "deploy:fanout": "tsx examples/deploy-fanout.ts",
+    "deploy:recovery": "tsx examples/deploy-recovery.ts",
+    "deploy:all": "tsx examples/deploy-one-pass.ts && tsx examples/deploy-fanout.ts && tsx examples/deploy-recovery.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:41729/git/frgmt0/bored"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "type": "module",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "run-of-show": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
