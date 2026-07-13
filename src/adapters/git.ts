@@ -130,11 +130,9 @@ export class GitWorktreeSpawnAdapter {
   /** Commit whatever is in the worktree (the abort/checkpoint path). */
   commitWip(worktree: string, message = "WIP checkpoint"): string {
     git(worktree, "add", "-A");
-    try {
-      git(worktree, "commit", "-m", message);
-    } catch {
-      // nothing to commit — fall through to current head
-    }
+    // An abort is a durable checkpoint even for a clean tree: the empty WIP
+    // commit records who stopped it and prevents a silent terminal path.
+    git(worktree, "commit", "--allow-empty", "-m", message);
     return git(worktree, "rev-parse", "HEAD");
   }
 
@@ -144,6 +142,16 @@ export class GitWorktreeSpawnAdapter {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, content);
     return this.commitWip(seat.request.worktree, message ?? `edit ${file}`);
+  }
+
+  /** Remove isolated arm worktrees once their run is terminal. The task
+   * worktree is retained as the inspectable task artifact/branch. */
+  reap(ref: string, branch: string): void {
+    if (branch === this.taskBranch(ref)) return;
+    const match = /\.arm-(\d+)$/.exec(branch);
+    if (!match) return;
+    const tree = path.join(this.worktreesDir(), `${refToSlug(ref)}-arm-${match[1]}`);
+    if (fs.existsSync(tree)) git(this.repoRoot, "worktree", "remove", "--force", tree);
   }
 
   seat(node: string, opts: { arm?: number; attempt?: number } = {}): SimSeat {

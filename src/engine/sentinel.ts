@@ -130,6 +130,9 @@ export class Sentinel {
       case "stalled":
         watch.driverStalled = true;
         break;
+      case "timeout":
+      case "error":
+      case "aborted":
       case "worker_refused":
       case "finished":
         // terminal — the engine untracks; nothing to renew

@@ -71,6 +71,15 @@ export type WorkerEvent =
   | { kind: "file_change"; path: string }
   | { kind: "checkpoint"; sha: string }
   | { kind: "stalled" }
+  /** The adapter killed the process group at its execution deadline. */
+  | { kind: "timeout"; timeoutMs: number; reason: string }
+  /** A non-terminal adapter/protocol failure with a stable code. */
+  | { kind: "error"; code: string; message: string }
+  /**
+   * The adapter reaped a worker which could not complete its protocol. This
+   * makes the WIP/abort receipt durable even when the worker died first.
+   */
+  | { kind: "aborted"; reason: string }
   | {
       kind: "finished";
       signal: DoneSignal | null;

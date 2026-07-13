@@ -248,6 +248,12 @@ export function applyEvent(run: FlowRun, ev: RunEvent): FlowRun {
       if (ev.seatKey) renewLease(run, ev.seatKey, ev.at);
       break;
     }
+    case "seat_timeout":
+    case "seat_aborted":
+    case "error_recorded": {
+      // Observability receipts do not alter the durable workflow projection.
+      break;
+    }
     case "signal_received": {
       const seat = run.seats[ev.seatKey];
       if (seat) {

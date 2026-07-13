@@ -52,6 +52,8 @@ interface LiveProcess {
   startedAtMs: number;
   finishedDelivered: boolean;
   aborted: boolean;
+  timeout?: NodeJS.Timeout;
+  terminate?: Promise<string>;
   turns: number;
   toolCalls: number;
   tokens: TokenUsage;
@@ -67,7 +69,7 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
     /** provisioning (worktrees, branches, base shas, WIP commits) is git's */
     private readonly git: GitWorktreeSpawnAdapter,
     private readonly command: CommandResolver,
-    private readonly opts: { killGraceMs?: number } = {},
+    private readonly opts: { killGraceMs?: number; executionTimeoutMs?: number } = {},
   ) {}
 
   connect(deliver: Deliver): void {
@@ -93,6 +95,12 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
     while (this.live.size > 0 || (await this.anyChainPending())) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
+  }
+
+  /** Reap every live process group before tracker shutdown. */
+  async shutdown(reason = "tracker_shutdown"): Promise<void> {
+    await Promise.all([...this.live.values()].map((proc) => this.terminate(proc, reason)));
+    await this.drain();
   }
 
   private async anyChainPending(): Promise<boolean> {
@@ -121,6 +129,9 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
         BECKETT_REF: request.ref,
       },
       stdio: ["pipe", "pipe", "pipe"],
+      // A detached child is the leader of a new process group on POSIX. This
+      // lets abort/timeout kill the worker's grandchildren, not just its PID.
+      detached: process.platform !== "win32",
     });
 
     const key = `${request.ref}::${request.seatKey}`;
@@ -135,6 +146,19 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
       tokens: { input: 0, output: 0 },
     };
     this.live.set(key, proc);
+    const timeoutMs = this.opts.executionTimeoutMs ?? request.envelope.wallClockS * 1000;
+    if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+      proc.timeout = setTimeout(() => {
+        void this.terminate(proc, "execution_timeout", timeoutMs).then(() => {
+          this.enqueue(key, proc, {
+            kind: "timeout",
+            timeoutMs,
+            reason: "execution_timeout",
+          });
+        });
+      }, timeoutMs);
+      proc.timeout.unref();
+    }
 
     let buffer = "";
     child.stdout.on("data", (chunk: Buffer) => {
@@ -147,19 +171,42 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
       }
     });
     child.stderr.on("data", () => {
-      /* worker chatter; the done-signal path carries the stderr tail on crash */
+      /* stderr is deliberately not mixed into the structured event feed */
     });
-    child.on("exit", (code) => {
+    child.on("error", (err) => {
+      // spawn(ENOENT) may emit close without exit. Terminate/commit anyway,
+      // then drive the same visible synthetic-exit path as a crashed worker.
+      void this.terminate(proc, "spawn_process_error").then(() => {
+        this.enqueue(key, proc, { kind: "error", code: "SPAWN_PROCESS_ERROR", message: err.message });
+        this.enqueue(key, proc, { kind: "aborted", reason: "spawn_process_error" });
+        this.live.delete(key);
+      });
+    });
+    child.on("exit", (code, signal) => {
+      if (proc.timeout) clearTimeout(proc.timeout);
+      delete proc.timeout;
       const tail = buffer.trim();
       if (tail) this.handleLine(key, proc, tail);
       if (!proc.finishedDelivered && !proc.aborted) {
-        // Died without a done-signal — the engine synthesizes and alarms.
-        this.enqueue(key, proc, {
-          kind: "finished",
-          signal: null,
-          error: `process exited with code ${code} without a done-signal`,
+        // An exiting parent can leave grandchildren behind. Commit WIP then
+        // kill its detached group before publishing the synthetic failure.
+        void this.terminate(proc, "worker_unexpected_exit").then(() => {
+          this.enqueue(key, proc, {
+            kind: "error",
+            code: "WORKER_UNEXPECTED_EXIT",
+            message: `worker exited code=${code ?? "null"} signal=${signal ?? "none"}`,
+          });
+          // Do not merely synthesize a finished signal here: the worker has
+          // already died, so this is an abort with a WIP receipt. The engine
+          // records seat_aborted before taking its retry ladder.
+          this.enqueue(key, proc, { kind: "aborted", reason: "worker_unexpected_exit" });
+          this.live.delete(key);
         });
+        return;
       }
+      // A normal done-signal still must not leave a helper in this seat's
+      // process group after the worker leader has exited.
+      if (!proc.aborted) this.killProcessGroup(proc, "SIGTERM");
       this.live.delete(key);
     });
 
@@ -170,21 +217,16 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
         try {
           proc.child.stdin.write(JSON.stringify({ kind: "nudge", text }) + "\n");
           return { receipt: "delivered" as const };
-        } catch {
+        } catch (err) {
+          this.enqueue(key, proc, {
+            kind: "error",
+            code: "NUDGE_WRITE_FAILED",
+            message: err instanceof Error ? err.message : String(err),
+          });
           return { receipt: "dropped" as const };
         }
       },
-      abort: async (reason: string) => {
-        proc.aborted = true;
-        void reason;
-        const sha = this.git.commitWip(request.worktree, `WIP: seat aborted`);
-        proc.child.kill("SIGTERM");
-        const grace = this.opts.killGraceMs ?? 3000;
-        setTimeout(() => {
-          if (proc.child.exitCode == null) proc.child.kill("SIGKILL");
-        }, grace).unref();
-        return sha;
-      },
+      abort: async (reason: string) => this.terminate(proc, reason),
       telemetry: () => ({
         turns: proc.turns,
         toolCalls: proc.toolCalls,
@@ -192,6 +234,90 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
         wallClockS: (Date.now() - proc.startedAtMs) / 1000,
       }),
     };
+  }
+
+  /** Commit first, then terminate the complete process group and wait for reaping. */
+  private terminate(proc: LiveProcess, reason: string, timeoutMs?: number): Promise<string> {
+    if (proc.terminate) return proc.terminate;
+    proc.aborted = true;
+    if (proc.timeout) clearTimeout(proc.timeout);
+    delete proc.timeout;
+    proc.terminate = (async () => {
+      let sha = "";
+      try {
+        // --allow-empty in the git adapter means even a clean abort has a WIP receipt.
+        sha = this.git.commitWip(proc.request.worktree, `WIP: seat aborted (${reason})`);
+      } catch (err) {
+        this.enqueue(`${proc.request.ref}::${proc.request.seatKey}`, proc, {
+          kind: "error",
+          code: "WIP_COMMIT_FAILED",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      const exited = this.waitForExit(proc.child);
+      this.killProcessGroup(proc, "SIGTERM");
+      const grace = this.opts.killGraceMs ?? 3000;
+      // `exit` only proves the leader is gone. A process group can outlive
+      // its leader, so also poll the group itself before declaring it reaped.
+      if (!(await this.waitForReap(proc, exited, grace))) {
+        this.killProcessGroup(proc, "SIGKILL");
+        if (!(await this.waitForReap(proc, exited, 1000))) {
+          this.enqueue(`${proc.request.ref}::${proc.request.seatKey}`, proc, {
+            kind: "error",
+            code: "PROCESS_GROUP_REAP_TIMEOUT",
+            message: "worker process group remained after SIGKILL",
+          });
+        }
+      }
+      void timeoutMs;
+      return sha;
+    })();
+    return proc.terminate;
+  }
+
+  private killProcessGroup(proc: LiveProcess, signal: NodeJS.Signals): void {
+    const { child } = proc;
+    if (child.pid == null) return;
+    try {
+      if (process.platform !== "win32") process.kill(-child.pid, signal);
+      else child.kill(signal);
+    } catch (err) {
+      // ESRCH is the successful "already reaped" outcome. Other failures
+      // are durable operator-visible errors, never a swallowed kill failure.
+      if ((err as NodeJS.ErrnoException).code !== "ESRCH") {
+        this.enqueue(`${proc.request.ref}::${proc.request.seatKey}`, proc, {
+          kind: "error",
+          code: "PROCESS_GROUP_KILL_FAILED",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  private async waitForReap(
+    proc: LiveProcess,
+    exited: Promise<void>,
+    ms: number,
+  ): Promise<boolean> {
+    const leaderExited = await settlesWithin(exited, ms);
+    if (!leaderExited) return false;
+    if (process.platform === "win32" || proc.child.pid == null) return true;
+    return processGroupGone(proc.child.pid, ms);
+  }
+
+  private waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (child.exitCode != null || child.signalCode != null) return Promise.resolve();
+    // `spawn` errors can produce close without exit. Either proves Node has
+    // released the child handle and lets the caller finish its WIP receipt.
+    return new Promise((resolve) => {
+      const done = () => {
+        child.removeListener("exit", done);
+        child.removeListener("close", done);
+        resolve();
+      };
+      child.once("exit", done);
+      child.once("close", done);
+    });
   }
 
   private handleLine(key: string, proc: LiveProcess, line: string): void {
@@ -293,6 +419,36 @@ export function coerceWorkerEvent(data: unknown): WorkerEvent | null {
     }
     default:
       return null;
+  }
+}
+
+async function settlesWithin(done: Promise<void>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      done.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** True only once no process remains in the detached worker's process group. */
+async function processGroupGone(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(-pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ESRCH") return true;
+      // EPERM means the group still exists but cannot be inspected as us.
+      if ((err as NodeJS.ErrnoException).code !== "EPERM") return false;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
 

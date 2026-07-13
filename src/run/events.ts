@@ -35,7 +35,7 @@ export type SignalSubtype =
   | "synthesized_ready_timeout" // never completed the §6.4 handshake
   | "synthesized_abort"; // operator/engine abort (pause, cancel, first-join)
 
-export type AlarmType = "stall" | "overrun" | "ready_timeout" | "silent_exit" | "budget";
+export type AlarmType = "stall" | "overrun" | "ready_timeout" | "silent_exit" | "budget" | "timeout";
 
 export interface Alarm {
   type: AlarmType;
@@ -107,6 +107,12 @@ export interface RunEventPayloads {
   progress_noted: { seatKey: SeatKey; turns: number; filesTouched: number; tokens: number };
   /** periodic WIP checkpoint (OPS-125 cadence) */
   checkpoint_committed: { seatKey?: SeatKey; sha: string; note?: string };
+  /** Adapter-enforced per-seat execution deadline fired. */
+  seat_timeout: { seatKey: SeatKey; timeoutMs: number; reason: string };
+  /** A seat was deliberately stopped after its WIP checkpoint was secured. */
+  seat_aborted: { seatKey: SeatKey; reason: string; checkpointSha?: string };
+  /** Categorised failure receipt. Codes are stable machine-facing identifiers. */
+  error_recorded: { code: string; message: string; seatKey?: SeatKey; operation: string };
   /** done-signal arrived (or was synthesized on crash) */
   signal_received: {
     seatKey: SeatKey;
@@ -182,8 +188,20 @@ export interface RunEventPayloads {
 
 export type RunEventType = keyof RunEventPayloads;
 
+/**
+ * Every persisted line carries this machine-facing envelope. `at` remains for
+ * backwards compatibility; `timestamp` is the explicit JSONL feed field.
+ */
 export type RunEvent = {
-  [T in RunEventType]: { seq: number; at: string; type: T } & RunEventPayloads[T];
+  [T in RunEventType]: {
+    seq: number;
+    at: string;
+    timestamp: string;
+    ticketRef: string;
+    runId: string;
+    type: T;
+    reason: string;
+  } & RunEventPayloads[T];
 }[RunEventType];
 
 export type RunEventInput = {
@@ -198,6 +216,9 @@ export const RUN_EVENT_TYPES: readonly RunEventType[] = [
   "worker_refused",
   "progress_noted",
   "checkpoint_committed",
+  "seat_timeout",
+  "seat_aborted",
+  "error_recorded",
   "signal_received",
   "edge_taken",
   "gate_decided",

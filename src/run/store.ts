@@ -81,7 +81,16 @@ export class RunStore {
    */
   append(ref: string, at: string, input: RunEventInput): RunEvent {
     const events = this.readEvents(ref);
-    const event = { seq: events.length + 1, at, ...input } as RunEvent;
+    const event = {
+      seq: events.length + 1,
+      at,
+      timestamp: at,
+      ticketRef: ref,
+      // A ref has exactly one durable run; it is therefore the stable run id.
+      runId: ref,
+      reason: eventReason(input),
+      ...input,
+    } as RunEvent;
     const file = this.logPath(ref);
     const fd = fs.openSync(file, "a");
     try {
@@ -191,5 +200,27 @@ export class RunStore {
       .split("\n")
       .filter(Boolean)
       .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+}
+
+/** A required concise reason makes each JSONL record independently useful. */
+function eventReason(event: RunEventInput): string {
+  switch (event.type) {
+    case "seat_spawned": return "spawned";
+    case "checkpoint_committed": return event.note ?? "checkpoint";
+    case "seat_timeout":
+    case "seat_aborted": return event.reason;
+    case "error_recorded": return event.code;
+    case "signal_received": return event.signal.blockedReason ?? event.subtype;
+    case "gate_decided": return event.verdict;
+    case "alarm_raised": return event.alarm.evidence;
+    case "parked": return event.reason;
+    case "run_cancelled": return event.reason ?? "cancelled";
+    case "worker_refused": return event.observed.reason ?? "worker_refused";
+    case "join_resolved": return event.reason ?? event.outcome;
+    case "edge_taken": return event.why;
+    case "budget_hit": return event.ceiling;
+    case "run_done": return event.outcome;
+    default: return event.type;
   }
 }
