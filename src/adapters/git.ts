@@ -151,11 +151,7 @@ export class GitWorktreeSpawnAdapter {
     const match = /\.arm-(\d+)$/.exec(branch);
     if (!match) return;
     const tree = path.join(this.worktreesDir(), `${refToSlug(ref)}-arm-${match[1]}`);
-    try {
-      if (fs.existsSync(tree)) git(this.repoRoot, "worktree", "remove", "--force", tree);
-    } catch {
-      // A terminal cleanup failure never hides the completed run; it can be retried.
-    }
+    if (fs.existsSync(tree)) git(this.repoRoot, "worktree", "remove", "--force", tree);
   }
 
   seat(node: string, opts: { arm?: number; attempt?: number } = {}): SimSeat {

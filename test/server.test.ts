@@ -123,9 +123,15 @@ describe("the tracker API", () => {
     expect((gated.data["ticket"] as { state: string }).state).toBe("done");
 
     const events = await call("GET", `/tickets/${enc("#1")}/events?tail=3`);
-    expect((events.data["events"] as Array<{ type: string }>).map((e) => e.type)).toContain(
-      "run_done",
-    );
+    const eventFeed = events.data["events"] as Array<{
+      type: string;
+      ticketRef: string;
+      runId: string;
+      timestamp: string;
+      reason: string;
+    }>;
+    expect(eventFeed.map((event) => event.type)).toContain("run_done");
+    expect(eventFeed.every((event) => event.ticketRef === "#1" && event.runId === "#1" && Boolean(event.timestamp) && Boolean(event.reason))).toBe(true);
     const journal = await call("GET", `/tickets/${enc("#1")}/journal?tail=1`);
     expect((journal.data["journal"] as string[])[0]).toContain("run done");
   });

@@ -63,10 +63,11 @@ emit({
   observedSha: git("rev-parse", "HEAD"),
 });
 if (mode === "crash") process.exit(137);
-if (mode === "hang-with-child") {
+if (mode === "hang-with-child" || mode === "die-with-child") {
   const { spawn } = require("node:child_process");
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   fs.writeFileSync(process.env.PID_FILE, String(child.pid));
+  if (mode === "die-with-child") process.exit(23);
   setInterval(() => {}, 1000);
   return;
 }
@@ -231,6 +232,19 @@ describe("ProcessSpawnAdapter — a real child process runs the work", () => {
     const events = rig.engine.store.readEvents("#p-abort");
     expect(events.some((event) => event.type === "seat_aborted" && event.reason === "operator pause")).toBe(true);
     expect(git(rig.git.taskWorktree("#p-abort"), "log", "--format=%s", "-1")).toContain("WIP: seat aborted");
+  });
+
+  it("reaps grandchildren after an unexpected worker death", async () => {
+    const pidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ros-pid-")), "child.pid");
+    const rig = makeProcRig({ WORKER_MODE: "die-with-child", PID_FILE: pidFile }, { killGraceMs: 50 });
+    const spec = presets.onePass();
+    spec.nodes["implement"]!.retries = 0;
+    await rig.engine.open("#p-death", spec, { body: "b" });
+    await waitFor(() => fs.existsSync(pidFile), "grandchild PID");
+    const pid = Number(fs.readFileSync(pidFile, "utf8"));
+    await waitFor(() => rig.engine.status("#p-death").status === "parked", "worker death to park");
+    await waitFor(() => pidIsGone(pid), "dead worker's grandchild to be reaped");
+    expect(rig.engine.store.readEvents("#p-death").some((event) => event.type === "error_recorded" && event.code === "WORKER_UNEXPECTED_EXIT")).toBe(true);
   });
 
   it("enforces a seat timeout, reaps descendants, and emits parseable timeout records", async () => {

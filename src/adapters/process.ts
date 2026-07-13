@@ -174,28 +174,42 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
       /* stderr is deliberately not mixed into the structured event feed */
     });
     child.on("error", (err) => {
-      this.enqueue(key, proc, { kind: "error", code: "SPAWN_PROCESS_ERROR", message: err.message });
+      // spawn(ENOENT) may emit close without exit. Terminate/commit anyway,
+      // then drive the same visible synthetic-exit path as a crashed worker.
+      void this.terminate(proc, "spawn_process_error").then((sha) => {
+        if (sha) this.enqueue(key, proc, { kind: "checkpoint", sha });
+        this.enqueue(key, proc, { kind: "error", code: "SPAWN_PROCESS_ERROR", message: err.message });
+        this.enqueue(key, proc, { kind: "finished", signal: null, error: err.message });
+        this.live.delete(key);
+      });
     });
     child.on("exit", (code, signal) => {
       if (proc.timeout) clearTimeout(proc.timeout);
       delete proc.timeout;
-      if (code !== 0 && !proc.aborted) {
-        this.enqueue(key, proc, {
-          kind: "error",
-          code: "WORKER_UNEXPECTED_EXIT",
-          message: `worker exited code=${code ?? "null"} signal=${signal ?? "none"}`,
-        });
-      }
       const tail = buffer.trim();
       if (tail) this.handleLine(key, proc, tail);
       if (!proc.finishedDelivered && !proc.aborted) {
-        // Died without a done-signal — the engine synthesizes and alarms.
-        this.enqueue(key, proc, {
-          kind: "finished",
-          signal: null,
-          error: `process exited with code ${code} without a done-signal`,
+        // An exiting parent can leave grandchildren behind. Commit WIP then
+        // kill its detached group before publishing the synthetic failure.
+        void this.terminate(proc, "worker_unexpected_exit").then((sha) => {
+          if (sha) this.enqueue(key, proc, { kind: "checkpoint", sha });
+          this.enqueue(key, proc, {
+            kind: "error",
+            code: "WORKER_UNEXPECTED_EXIT",
+            message: `worker exited code=${code ?? "null"} signal=${signal ?? "none"}`,
+          });
+          this.enqueue(key, proc, {
+            kind: "finished",
+            signal: null,
+            error: `process exited with code ${code} without a done-signal`,
+          });
+          this.live.delete(key);
         });
+        return;
       }
+      // A normal done-signal still must not leave a helper in this seat's
+      // process group after the worker leader has exited.
+      if (!proc.aborted) this.killProcessGroup(proc.child, "SIGTERM");
       this.live.delete(key);
     });
 
@@ -206,7 +220,12 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
         try {
           proc.child.stdin.write(JSON.stringify({ kind: "nudge", text }) + "\n");
           return { receipt: "delivered" as const };
-        } catch {
+        } catch (err) {
+          this.enqueue(key, proc, {
+            kind: "error",
+            code: "NUDGE_WRITE_FAILED",
+            message: err instanceof Error ? err.message : String(err),
+          });
           return { receipt: "dropped" as const };
         }
       },
