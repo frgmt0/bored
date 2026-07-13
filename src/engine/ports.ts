@@ -75,6 +75,11 @@ export type WorkerEvent =
   | { kind: "timeout"; timeoutMs: number; reason: string }
   /** A non-terminal adapter/protocol failure with a stable code. */
   | { kind: "error"; code: string; message: string }
+  /**
+   * The adapter reaped a worker which could not complete its protocol. This
+   * makes the WIP/abort receipt durable even when the worker died first.
+   */
+  | { kind: "aborted"; reason: string }
   | {
       kind: "finished";
       signal: DoneSignal | null;

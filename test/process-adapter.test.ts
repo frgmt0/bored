@@ -244,7 +244,10 @@ describe("ProcessSpawnAdapter — a real child process runs the work", () => {
     const pid = Number(fs.readFileSync(pidFile, "utf8"));
     await waitFor(() => rig.engine.status("#p-death").status === "parked", "worker death to park");
     await waitFor(() => pidIsGone(pid), "dead worker's grandchild to be reaped");
-    expect(rig.engine.store.readEvents("#p-death").some((event) => event.type === "error_recorded" && event.code === "WORKER_UNEXPECTED_EXIT")).toBe(true);
+    const events = rig.engine.store.readEvents("#p-death");
+    expect(events.some((event) => event.type === "error_recorded" && event.code === "WORKER_UNEXPECTED_EXIT")).toBe(true);
+    expect(events.some((event) => event.type === "seat_aborted" && event.reason === "worker_unexpected_exit")).toBe(true);
+    expect(git(rig.git.taskWorktree("#p-death"), "log", "--format=%s", "-1")).toContain("WIP: seat aborted");
   });
 
   it("enforces a seat timeout, reaps descendants, and emits parseable timeout records", async () => {

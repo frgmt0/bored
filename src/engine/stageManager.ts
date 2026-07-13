@@ -374,6 +374,22 @@ export class StageManager {
           operation: "worker_adapter",
         });
         return;
+      case "aborted": {
+        // An adapter can discover that the process has already died (or that
+        // spawn itself failed). Preserve the same visible abort/WIP receipt
+        // and retry semantics as an engine-initiated abort.
+        this.append(ref, {
+          type: "alarm_raised",
+          alarm: {
+            type: "silent_exit",
+            seatKey,
+            node: seatState.node,
+            evidence: ev.reason,
+          },
+        });
+        await this.failSeat(ref, seatKey, "synthesized_process_exit", ev.reason);
+        return;
+      }
       case "timeout":
         this.append(ref, {
           type: "seat_timeout",
