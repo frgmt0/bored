@@ -418,6 +418,13 @@ export class StageManager {
           sha,
           note: `WIP committed on refusal: ${reason}`,
         });
+        else this.append(ref, {
+          type: "error_recorded",
+          code: "WIP_COMMIT_FAILED",
+          message: "refusal abort completed without a WIP commit SHA",
+          seatKey,
+          operation: "refusal_abort",
+        });
       } catch (err) {
         this.append(ref, {
           type: "error_recorded",
@@ -1452,6 +1459,14 @@ export class StageManager {
             seatKey,
             sha: checkpointSha,
             note: `WIP committed on abort: ${reason}`,
+          });
+        } else {
+          this.append(ref, {
+            type: "error_recorded",
+            code: "WIP_COMMIT_FAILED",
+            message: "abort completed without a WIP commit SHA",
+            seatKey,
+            operation: "abort",
           });
         }
       } catch (err) {
