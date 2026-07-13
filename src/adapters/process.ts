@@ -178,7 +178,7 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
     });
     child.on("exit", (code, signal) => {
       if (proc.timeout) clearTimeout(proc.timeout);
-      proc.timeout = undefined;
+      delete proc.timeout;
       if (code !== 0 && !proc.aborted) {
         this.enqueue(key, proc, {
           kind: "error",
@@ -225,7 +225,7 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
     if (proc.terminate) return proc.terminate;
     proc.aborted = true;
     if (proc.timeout) clearTimeout(proc.timeout);
-    proc.timeout = undefined;
+    delete proc.timeout;
     proc.terminate = (async () => {
       let sha = "";
       try {

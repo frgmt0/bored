@@ -63,6 +63,13 @@ emit({
   observedSha: git("rev-parse", "HEAD"),
 });
 if (mode === "crash") process.exit(137);
+if (mode === "hang-with-child") {
+  const { spawn } = require("node:child_process");
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  fs.writeFileSync(process.env.PID_FILE, String(child.pid));
+  setInterval(() => {}, 1000);
+  return;
+}
 if (mode === "hang-for-nudge") {
   // wait for a nudge on stdin, echo it into the summary, then finish
   let buf = "";
@@ -101,7 +108,10 @@ interface ProcRig {
   workerPath: string;
 }
 
-function makeProcRig(env: Record<string, string> = {}): ProcRig {
+function makeProcRig(
+  env: Record<string, string> = {},
+  processOpts: { killGraceMs?: number; executionTimeoutMs?: number } = {},
+): ProcRig {
   const repo = makeRepo();
   const workerPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ros-worker-")), "worker.cjs");
   fs.writeFileSync(workerPath, WORKER_JS);
@@ -110,7 +120,7 @@ function makeProcRig(env: Record<string, string> = {}): ProcRig {
     cmd: process.execPath,
     args: [workerPath],
     env,
-  }));
+  }), processOpts);
   const sink = new CollectingSink();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ros-proc-store-"));
   const engine = new StageManager(root, adapter, new GitMergeProvider(gitAdapter), sink, {
@@ -119,6 +129,15 @@ function makeProcRig(env: Record<string, string> = {}): ProcRig {
   });
   adapter.connect((ref, seatKey, ev) => engine.deliverWorkerEvent(ref, seatKey, ev));
   return { engine, adapter, git: gitAdapter, repo, sink, workerPath };
+}
+
+function pidIsGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
 }
 
 async function waitFor(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
@@ -199,6 +218,40 @@ describe("ProcessSpawnAdapter — a real child process runs the work", () => {
     expect((signal as { signal: { summary: string } }).signal.summary).toBe(
       "heard: prefer approach B",
     );
+  });
+
+  it("reaps a worker process group and records WIP + an abort reason", async () => {
+    const pidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ros-pid-")), "child.pid");
+    const rig = makeProcRig({ WORKER_MODE: "hang-with-child", PID_FILE: pidFile }, { killGraceMs: 50 });
+    await rig.engine.open("#p-abort", presets.onePass(), { body: "b" });
+    await waitFor(() => fs.existsSync(pidFile), "grandchild PID");
+    const pid = Number(fs.readFileSync(pidFile, "utf8"));
+    await rig.engine.pause("#p-abort");
+    await waitFor(() => pidIsGone(pid), "grandchild to be reaped");
+    const events = rig.engine.store.readEvents("#p-abort");
+    expect(events.some((event) => event.type === "seat_aborted" && event.reason === "operator pause")).toBe(true);
+    expect(git(rig.git.taskWorktree("#p-abort"), "log", "--format=%s", "-1")).toContain("WIP: seat aborted");
+  });
+
+  it("enforces a seat timeout, reaps descendants, and emits parseable timeout records", async () => {
+    const pidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ros-pid-")), "child.pid");
+    const rig = makeProcRig(
+      { WORKER_MODE: "hang-with-child", PID_FILE: pidFile },
+      { killGraceMs: 50, executionTimeoutMs: 150 },
+    );
+    const spec = presets.onePass();
+    spec.nodes["implement"]!.retries = 0;
+    await rig.engine.open("#p-timeout", spec, { body: "b" });
+    await waitFor(() => fs.existsSync(pidFile), "grandchild PID");
+    const pid = Number(fs.readFileSync(pidFile, "utf8"));
+    await waitFor(() => rig.engine.status("#p-timeout").status === "parked", "timeout to park");
+    await waitFor(() => pidIsGone(pid), "timed-out grandchild to be reaped");
+    const events = rig.engine.store.readEvents("#p-timeout");
+    const timeout = events.find((event) => event.type === "seat_timeout");
+    expect(timeout).toMatchObject({ ticketRef: "#p-timeout", runId: "#p-timeout", reason: "execution_timeout" });
+    expect(timeout?.timestamp).toMatch(/^\d{4}-\d\d-\d\dT/);
+    expect(events.some((event) => event.type === "seat_aborted" && event.reason === "execution_timeout")).toBe(true);
+    expect(git(rig.git.taskWorktree("#p-timeout"), "log", "--format=%s", "-1")).toContain("WIP: seat aborted");
   });
 
   it("works end to end under the tracker (ticket → real process → done)", async () => {
