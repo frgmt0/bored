@@ -46,6 +46,8 @@ export interface Ticket {
   needs: string[];
   /** the run of show; when absent, compiled from `cast` at staffing (§3.2) */
   flow?: FlowSpec;
+  /** the flow was authored by this script (resolved path) — reloaded on boot */
+  flowScript?: string;
   cast?: HarnessSpec;
   /** node → tracker column; falls back to node-kind defaults */
   stateMap?: Record<NodeId, TicketState>;
@@ -69,6 +71,8 @@ export const fileTicketSchema = z
     parent: z.string().optional(),
     needs: z.array(z.string()).optional(),
     flow: flowSpecSchema.optional(),
+    /** author the flow with a .js/.mjs/.cjs script instead (see src/authoring) */
+    flowScript: z.string().optional(),
     cast: harnessSpecSchema.optional(),
     stateMap: z.record(z.string(), ticketStateSchema).optional(),
     autoStaff: z.boolean().optional(),

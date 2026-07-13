@@ -36,5 +36,9 @@ export * from "./tracker/store.js";
 export * from "./tracker/tracker.js";
 export * from "./server.js";
 
+// Scripted authoring: the fluent builder + .js flow scripts with hooks
+export * from "./authoring/builder.js";
+export * from "./authoring/script.js";
+
 // Appendix A + §8 presets
 export * as presets from "./presets.js";

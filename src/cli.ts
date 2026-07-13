@@ -16,7 +16,8 @@
  * against a server (--api http://127.0.0.1:PORT):
  *   run-of-show board
  *   run-of-show file --title T [--body B] [--criteria C]… [--needs R]…
- *                    [--parent R] [--flow spec.json] [--no-auto-staff]
+ *                    [--parent R] [--flow spec.json | --flow-script flow.mjs]
+ *                    [--no-auto-staff]
  *   run-of-show ticket <ref>
  *   run-of-show staff <ref>
  *   run-of-show nudge <ref> "text" [--node N]
@@ -201,6 +202,9 @@ switch (command) {
       ...(arg("--parent") !== undefined ? { parent: arg("--parent") } : {}),
       ...(arg("--channel") !== undefined ? { originChannel: arg("--channel") } : {}),
       ...(flowFile ? { flow: JSON.parse(fs.readFileSync(flowFile, "utf8")) } : {}),
+      ...(arg("--flow-script") !== undefined
+        ? { flowScript: path.resolve(arg("--flow-script")!) }
+        : {}),
       ...(has("--no-auto-staff") ? { autoStaff: false } : {}),
     }).then((data) => console.log(JSON.stringify((data as { ticket: unknown }).ticket, null, 2)));
     break;

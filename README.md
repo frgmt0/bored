@@ -96,6 +96,51 @@ the branch/sha it observes via git), emits progress events on stdout, and
 finishes with a done-signal. A process that dies silently is alarmed,
 retried, and parked by the engine — never lost.
 
+## Authoring workflows in JavaScript
+
+JSON specs and presets still work, but flows can be *scripted*: a `.js`/
+`.mjs`/`.cjs` file default-exports a function that receives the ticket and
+returns the flow — so the shape is computed for the task at hand instead of
+one rigid structure for everything:
+
+```js
+// adaptive.flow.mjs (full version in examples/flows/)
+export default ({ ticket, flow, presets }) => {
+  if (/hotfix/i.test(ticket.title)) return presets.onePass();
+  const areas = /areas:\s*(.+)/i.exec(ticket.body ?? "")?.[1]?.split(",");
+  if (areas) {
+    return flow()
+      .fanout("split", {
+        arms: areas.map((a) => ({ cast: { harness: "pi", effort: "high" }, brief: `own ${a.trim()}` })),
+        join: "land",
+      })
+      .join("land", { strategy: "all-merge", onPass: "review" })
+      .gate("review", { by: { cast: { harness: "claude", model: "claude-sonnet-5" }, rubric: "criteria-vs-diff" }, onPass: "done" })
+      .budget({ usd: 40 })
+      .build();
+  }
+  return presets.reviewedLifecycle();
+};
+
+// hooks: a scripted concierge with operator authority, per task
+export const hooks = {
+  async onEvent({ event, actions }) {
+    if (event.type === "parked" && event.reason === "max_visits_exhausted") {
+      await actions.resume({ extraVisits: 1 }); // one free extension, then a human owns it
+    }
+  },
+};
+```
+
+File it with `flowScript` (API), `--flow-script` (CLI), or
+`tracker.file({..., flowScript})`. Scripting controls shape and management —
+never the execution guarantees: the returned flow goes through the full
+linter (bounded loops, closed node algebra), hooks run off the event path
+with the same verbs a human concierge has, and budgets/caps still fence
+everything, so scripted flows should set a budget. Hooks are reloaded from
+the stored script path on recovery; hook errors are journalled, never fatal.
+The fluent `flow()` builder is also exported for TypeScript callers.
+
 ## Using it as a primitive
 
 ```ts

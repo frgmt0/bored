@@ -34,6 +34,7 @@ import {
   type TicketState,
 } from "./ticket.js";
 import { TicketStore } from "./store.js";
+import { loadFlowScript, type FlowHooks, type HookActions } from "../authoring/script.js";
 
 const DEFAULT_CAST: HarnessSpec = { harness: "claude", model: "claude-sonnet-5", effort: "high" };
 
@@ -49,8 +50,10 @@ export interface TicketStatus {
 export class Tracker {
   readonly engine: StageManager;
   readonly tickets: TicketStore;
-  /** serialised async work (auto-staffing promoted tickets) */
+  /** serialised async work (auto-staffing promoted tickets, script hooks) */
   private work: Promise<void> = Promise.resolve();
+  /** per-ticket flow-script hooks — in-memory, reloaded on recover() */
+  private hooks = new Map<string, FlowHooks>();
 
   constructor(
     root: string,
@@ -82,7 +85,24 @@ export class Tracker {
 
   async file(input: FileTicketInput): Promise<Ticket> {
     const parsed = fileTicketSchema.parse(input);
+    if (parsed.flow && parsed.flowScript) {
+      throw new Error("provide flow OR flowScript, not both");
+    }
     if (parsed.flow) mustLint(parsed.flow); // fail at filing, not staffing
+    // Scripted authoring: run the script with the ticket context; the shape
+    // is computed for this task, then linted and frozen like any other spec.
+    let scriptHooks: FlowHooks | undefined;
+    if (parsed.flowScript) {
+      const loaded = await loadFlowScript(parsed.flowScript, {
+        title: parsed.title,
+        ...(parsed.body !== undefined ? { body: parsed.body } : {}),
+        ...(parsed.criteria !== undefined ? { criteria: parsed.criteria } : {}),
+      });
+      parsed.flow = loaded.flow;
+      parsed.stateMap ??= loaded.stateMap;
+      parsed.flowScript = loaded.scriptPath;
+      scriptHooks = loaded.hooks;
+    }
     const now = new Date().toISOString();
 
     const ticket = this.tickets.update((tasks): Ticket => {
@@ -130,6 +150,7 @@ export class Tracker {
         children: [],
         needs,
         ...(parsed.flow !== undefined ? { flow: parsed.flow as FlowSpec } : {}),
+        ...(parsed.flowScript !== undefined ? { flowScript: parsed.flowScript } : {}),
         ...(parsed.cast !== undefined ? { cast: parsed.cast as HarnessSpec } : {}),
         ...(parsed.stateMap !== undefined
           ? { stateMap: parsed.stateMap as Record<string, TicketState> }
@@ -142,6 +163,7 @@ export class Tracker {
       tasks.tickets[ref] = ticket;
       return ticket;
     });
+    if (scriptHooks) this.hooks.set(ticket.ref, scriptHooks);
 
     if (ticket.state === "todo" && ticket.autoStaff) {
       await this.staff(ticket.ref);
@@ -251,6 +273,26 @@ export class Tracker {
 
   /** Boot: replay runs, re-project every ticket, run missed promotions. */
   async recover(): Promise<void> {
+    // Reload flow-script hooks before replay so the scripted concierge
+    // hears the recovery events too. A script that fails to load is
+    // journalled and skipped — the run itself is unaffected.
+    for (const ticket of this.tickets.list()) {
+      if (!ticket.flowScript || isTerminal(ticket.state)) continue;
+      try {
+        const loaded = await loadFlowScript(ticket.flowScript, {
+          title: ticket.title,
+          ...(ticket.body !== undefined ? { body: ticket.body } : {}),
+          ...(ticket.criteria !== undefined ? { criteria: ticket.criteria } : {}),
+        });
+        if (loaded.hooks) this.hooks.set(ticket.ref, loaded.hooks);
+      } catch (err) {
+        this.engine.store.journal(
+          ticket.ref,
+          new Date().toISOString(),
+          `flow-script reload failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     await this.engine.recoverAll();
     for (const ticket of this.tickets.list()) {
       if (ticket.staffed) this.reproject(ticket.ref);
@@ -268,6 +310,51 @@ export class Tracker {
     if (!this.tickets.get(ref)) return; // runs opened outside the tracker
     this.reprojectFrom(ref, run);
     if (event.type === "run_done") this.promoteDependents(ref);
+    // Flow-script hooks: the scripted concierge sees every event, off the
+    // event path so its operator verbs never re-enter the engine mid-append.
+    const hooks = this.hooks.get(ref);
+    if (hooks?.onEvent) {
+      const onEvent = hooks.onEvent;
+      this.work = this.work.then(async () => {
+        try {
+          await onEvent({ ref, event, run, actions: this.hookActions(ref) });
+        } catch (err) {
+          // hook failures are announced in the journal, never crash the run
+          this.engine.store.journal(
+            ref,
+            new Date().toISOString(),
+            `flow-script hook error on ${event.type}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      });
+    }
+  }
+
+  private hookActions(ref: string): HookActions {
+    return {
+      nudge: (text, node) => this.nudge(ref, text, node),
+      pause: async () => {
+        await this.pause(ref);
+      },
+      resume: async (grant) => {
+        await this.resume(ref, grant);
+      },
+      decideGate: async (node, verdict, note) => {
+        await this.decideGate(ref, node, verdict, note);
+      },
+      cancel: async (reason) => {
+        await this.cancel(ref, reason);
+      },
+      file: async (input) => {
+        const ticket = await this.file(input as FileTicketInput);
+        return { ref: ticket.ref };
+      },
+    };
+  }
+
+  /** Tickets with live flow-script hooks (introspection, tests). */
+  hookRefs(): string[] {
+    return [...this.hooks.keys()];
   }
 
   private reproject(ref: string): void {
