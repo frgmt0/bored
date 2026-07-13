@@ -71,6 +71,10 @@ export type WorkerEvent =
   | { kind: "file_change"; path: string }
   | { kind: "checkpoint"; sha: string }
   | { kind: "stalled" }
+  /** The adapter killed the process group at its execution deadline. */
+  | { kind: "timeout"; timeoutMs: number; reason: string }
+  /** A non-terminal adapter/protocol failure with a stable code. */
+  | { kind: "error"; code: string; message: string }
   | {
       kind: "finished";
       signal: DoneSignal | null;
