@@ -1,0 +1,22 @@
+# Install with scripts/install-systemd-user-service.sh; it writes
+# ~/.config/bored/bored.env and copies this file to
+# ~/.config/systemd/user/bored.service.
+#
+# Keep this service user-scoped: the tracker state and git worktrees belong to
+# the Beckett account, and the HTTP listener deliberately stays on localhost.
+[Unit]
+Description=bored ticket tracker and workflow engine
+Documentation=https://github.com/frgmt0/bored/blob/main/docs/loom-desk-service.md
+After=network.target
+
+[Service]
+Type=simple
+Environment=NODE_ENV=production
+EnvironmentFile=%h/.config/bored/bored.env
+ExecStart=${BORED_NODE} ${BORED_CLI} serve --root ${BORED_ROOT} --repo ${BORED_REPO} --worker ${BORED_WORKER} --port ${BORED_PORT} --max-workers ${BORED_MAX_WORKERS} --owner-dm ${BORED_OWNER_DM}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+
+[Install]
+WantedBy=default.target
