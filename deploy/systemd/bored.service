@@ -13,7 +13,7 @@ After=network.target
 Type=simple
 Environment=NODE_ENV=production
 EnvironmentFile=%h/.config/bored/bored.env
-ExecStart=${BORED_NODE} ${BORED_CLI} serve --root ${BORED_ROOT} --repo ${BORED_REPO} --worker ${BORED_WORKER} --port ${BORED_PORT} --max-workers ${BORED_MAX_WORKERS} --owner-dm ${BORED_OWNER_DM}
+ExecStart=/usr/bin/env ${BORED_NODE} ${BORED_CLI} serve --root ${BORED_ROOT} --repo ${BORED_REPO} --worker ${BORED_WORKER} --port ${BORED_PORT} --max-workers ${BORED_MAX_WORKERS} --owner-dm ${BORED_OWNER_DM}
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=45s
