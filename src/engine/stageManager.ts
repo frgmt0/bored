@@ -229,21 +229,39 @@ export class StageManager {
     const steerId = `s${run.lastSeq + 1}`;
 
     if (live.length === 0) {
+<<<<<<< HEAD
       this.append(ref, { type: "nudge_delivered", receipt: "queued", text, steerId });
       return { receipt: "queued", steerId, buffered: true };
+=======
+      this.append(ref, {
+        type: "nudge_delivered",
+        receipt: "queued",
+        text,
+        ...(node != null ? { node } : {}),
+      });
+      return { receipt: "queued" };
+>>>>>>> origin/main
     }
     let last: NudgeReceipt = { receipt: "dropped" };
+    let landed = false;
     for (const seat of live) {
+<<<<<<< HEAD
       const r = seat.handle.nudge(text, steerId);
+=======
+      last = seat.handle.nudge(text);
+      if (last.receipt !== "dropped") landed = true;
+>>>>>>> origin/main
       this.append(ref, {
         type: "nudge_delivered",
         receipt: r.receipt,
         target: seat.request.seatKey,
+        ...(node != null ? { node } : {}),
         text,
         steerId,
       });
       last = r;
     }
+<<<<<<< HEAD
     return { ...last, steerId, buffered: true };
   }
 
@@ -278,6 +296,22 @@ export class StageManager {
     }
     await this.reconcile(ref);
     return { receipt: "will-restart", steerId, buffered: true };
+=======
+    // Every targeted seat dropped it — the worker(s) were reaped between the
+    // registry lookup and the write (the child had already exited). Buffer
+    // the steer so the replacement seat picks it up instead of losing it.
+    if (!landed) {
+      this.append(ref, {
+        type: "nudge_delivered",
+        receipt: "queued",
+        text,
+        ...(node != null ? { node } : {}),
+      });
+      return { receipt: "queued" };
+    }
+    void run;
+    return last;
+>>>>>>> origin/main
   }
 
   async pause(ref: string): Promise<void> {
@@ -1413,7 +1447,16 @@ export class StageManager {
         ...(nodeBrief !== undefined ? { nodeBrief } : {}),
         ...(rubric !== undefined ? { rubric } : {}),
         priorArtifacts,
+<<<<<<< HEAD
         steers: run.pendingSteers.map((s) => ({ id: s.id, text: s.text, at: s.at })),
+=======
+        // Only steers addressed to this node (or to no node in particular)
+        // fold into the brief — the same predicate the fold drains on, so
+        // what this seat reads is exactly what leaves the buffer (§5.5).
+        steers: run.pendingSteers
+          .filter((s) => s.node == null || s.node === node)
+          .map((s) => ({ text: s.text, at: s.at })),
+>>>>>>> origin/main
       },
       manifest,
       envelope,

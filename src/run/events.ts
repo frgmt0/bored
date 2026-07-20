@@ -160,6 +160,8 @@ export interface RunEventPayloads {
   nudge_delivered: {
     receipt: "delivered" | "queued" | "will-restart" | "dropped";
     target?: SeatKey;
+    /** the node the steer was addressed to; undefined = any live seat */
+    node?: NodeId;
     text: string;
     /**
      * The steer's stable id. Present for operator/concierge steers (which are
