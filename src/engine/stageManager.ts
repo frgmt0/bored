@@ -229,28 +229,20 @@ export class StageManager {
     const steerId = `s${run.lastSeq + 1}`;
 
     if (live.length === 0) {
-<<<<<<< HEAD
-      this.append(ref, { type: "nudge_delivered", receipt: "queued", text, steerId });
-      return { receipt: "queued", steerId, buffered: true };
-=======
       this.append(ref, {
         type: "nudge_delivered",
         receipt: "queued",
         text,
+        steerId,
         ...(node != null ? { node } : {}),
       });
-      return { receipt: "queued" };
->>>>>>> origin/main
+      return { receipt: "queued", steerId, buffered: true };
     }
     let last: NudgeReceipt = { receipt: "dropped" };
     let landed = false;
     for (const seat of live) {
-<<<<<<< HEAD
       const r = seat.handle.nudge(text, steerId);
-=======
-      last = seat.handle.nudge(text);
-      if (last.receipt !== "dropped") landed = true;
->>>>>>> origin/main
+      if (r.receipt !== "dropped") landed = true;
       this.append(ref, {
         type: "nudge_delivered",
         receipt: r.receipt,
@@ -261,7 +253,20 @@ export class StageManager {
       });
       last = r;
     }
-<<<<<<< HEAD
+    // Every targeted seat dropped it — the worker(s) were reaped between the
+    // registry lookup and the write (the child had already exited). Buffer
+    // the steer (with its steerId, so buffer dedup stays consistent) so the
+    // replacement seat picks it up instead of losing it.
+    if (!landed) {
+      this.append(ref, {
+        type: "nudge_delivered",
+        receipt: "queued",
+        text,
+        steerId,
+        ...(node != null ? { node } : {}),
+      });
+      return { receipt: "queued", steerId, buffered: true };
+    }
     return { ...last, steerId, buffered: true };
   }
 
@@ -283,8 +288,15 @@ export class StageManager {
     );
     const steerId = `s${run.lastSeq + 1}`;
     // Buffer first so the re-staffed seat is guaranteed to carry the steer,
-    // even if the interrupt races a natural finish.
-    this.append(ref, { type: "nudge_delivered", receipt: "queued", text, steerId });
+    // even if the interrupt races a natural finish. `node` rides along so the
+    // steer only folds into that node's next seat (§5.5 routing).
+    this.append(ref, {
+      type: "nudge_delivered",
+      receipt: "queued",
+      text,
+      steerId,
+      ...(node != null ? { node } : {}),
+    });
     if (live.length === 0) return { receipt: "queued", steerId, buffered: true };
     this.suppressAdvance.add(ref);
     try {
@@ -296,22 +308,6 @@ export class StageManager {
     }
     await this.reconcile(ref);
     return { receipt: "will-restart", steerId, buffered: true };
-=======
-    // Every targeted seat dropped it — the worker(s) were reaped between the
-    // registry lookup and the write (the child had already exited). Buffer
-    // the steer so the replacement seat picks it up instead of losing it.
-    if (!landed) {
-      this.append(ref, {
-        type: "nudge_delivered",
-        receipt: "queued",
-        text,
-        ...(node != null ? { node } : {}),
-      });
-      return { receipt: "queued" };
-    }
-    void run;
-    return last;
->>>>>>> origin/main
   }
 
   async pause(ref: string): Promise<void> {
@@ -1447,16 +1443,14 @@ export class StageManager {
         ...(nodeBrief !== undefined ? { nodeBrief } : {}),
         ...(rubric !== undefined ? { rubric } : {}),
         priorArtifacts,
-<<<<<<< HEAD
-        steers: run.pendingSteers.map((s) => ({ id: s.id, text: s.text, at: s.at })),
-=======
         // Only steers addressed to this node (or to no node in particular)
         // fold into the brief — the same predicate the fold drains on, so
-        // what this seat reads is exactly what leaves the buffer (§5.5).
+        // what this seat reads is exactly what leaves the buffer (§5.5). The
+        // internal steerId stays in the buffer; the brief carries only the
+        // text and timestamp the seat reads.
         steers: run.pendingSteers
           .filter((s) => s.node == null || s.node === node)
           .map((s) => ({ text: s.text, at: s.at })),
->>>>>>> origin/main
       },
       manifest,
       envelope,

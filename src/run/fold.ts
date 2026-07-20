@@ -332,23 +332,20 @@ export function applyEvent(run: FlowRun, ev: RunEvent): FlowRun {
       break;
     }
     case "nudge_delivered": {
-<<<<<<< HEAD
       // Every operator/concierge steer (one carrying a steerId) is durably
       // buffered — whether it was queued or handed live to a worker — so it is
       // guaranteed to reach the run: an ack drains it, otherwise it folds into
       // the next seat's brief. Dedup by id: one logical steer fanned out to
-      // several live seats buffers once. Sentinel pokes carry no id and are
-      // never buffered.
+      // several live seats buffers once. `node` rides along so the steer is
+      // only delivered to that node's next seat (§5.5 routing). Sentinel pokes
+      // carry no id and are never buffered.
       if (ev.steerId != null && !run.pendingSteers.some((s) => s.id === ev.steerId)) {
-        run.pendingSteers.push({ id: ev.steerId, text: ev.text, at: ev.at });
-=======
-      if (ev.receipt === "queued") {
         run.pendingSteers.push({
+          id: ev.steerId,
           text: ev.text,
           at: ev.at,
           ...(ev.node != null ? { node: ev.node } : {}),
         });
->>>>>>> origin/main
       }
       break;
     }
