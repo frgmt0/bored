@@ -108,11 +108,12 @@ export interface FlowRun {
   joins: Record<NodeId, JoinState>;
   grants: Grants;
   /**
-   * buffered steering waiting for the next seat (§5.5). `node` records the
-   * seat a steer was addressed to so it is only delivered to that node's
-   * next seat; an undefined `node` folds into whatever seat spawns next.
+   * buffered steering waiting for the next seat (§5.5), keyed by steer id.
+   * `node` records the seat a steer was addressed to so it is only delivered
+   * to that node's next seat; an undefined `node` folds into whatever seat
+   * spawns next.
    */
-  pendingSteers: Array<{ text: string; at: string; node?: NodeId }>;
+  pendingSteers: Array<{ id: string; text: string; at: string; node?: NodeId }>;
   /** alarms currently standing (raised, not yet cleared) */
   activeAlarms: Alarm[];
   openedAt: string;
@@ -331,13 +332,27 @@ export function applyEvent(run: FlowRun, ev: RunEvent): FlowRun {
       break;
     }
     case "nudge_delivered": {
-      if (ev.receipt === "queued") {
+      // Every operator/concierge steer (one carrying a steerId) is durably
+      // buffered — whether it was queued or handed live to a worker — so it is
+      // guaranteed to reach the run: an ack drains it, otherwise it folds into
+      // the next seat's brief. Dedup by id: one logical steer fanned out to
+      // several live seats buffers once. `node` rides along so the steer is
+      // only delivered to that node's next seat (§5.5 routing). Sentinel pokes
+      // carry no id and are never buffered.
+      if (ev.steerId != null && !run.pendingSteers.some((s) => s.id === ev.steerId)) {
         run.pendingSteers.push({
+          id: ev.steerId,
           text: ev.text,
           at: ev.at,
           ...(ev.node != null ? { node: ev.node } : {}),
         });
       }
+      break;
+    }
+    case "nudge_acked": {
+      // A live worker confirmed it applied the steer — drop it from the buffer
+      // so it does not also fold into a later seat's brief.
+      run.pendingSteers = run.pendingSteers.filter((s) => s.id !== ev.steerId);
       break;
     }
     case "parked": {

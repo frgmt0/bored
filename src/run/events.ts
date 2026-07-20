@@ -163,7 +163,15 @@ export interface RunEventPayloads {
     /** the node the steer was addressed to; undefined = any live seat */
     node?: NodeId;
     text: string;
+    /**
+     * The steer's stable id. Present for operator/concierge steers (which are
+     * durably buffered and tracked to an ack); absent for the Sentinel's
+     * ephemeral liveness pokes, which must never fold into a brief.
+     */
+    steerId?: string;
   };
+  /** a live worker confirmed it applied a buffered steer — drains the buffer */
+  nudge_acked: { steerId: string; seatKey?: SeatKey };
   /** run handed to a human */
   parked: {
     reason: ParkReason;
@@ -229,6 +237,7 @@ export const RUN_EVENT_TYPES: readonly RunEventType[] = [
   "alarm_raised",
   "alarm_cleared",
   "nudge_delivered",
+  "nudge_acked",
   "parked",
   "resumed",
   "budget_hit",

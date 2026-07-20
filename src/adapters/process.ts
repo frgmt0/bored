@@ -12,10 +12,16 @@
  *     {"kind":"file_change","path":…}
  *     {"kind":"checkpoint","sha":…}
  *     {"kind":"stalled"}
+ *     {"kind":"nudge_ack","steerId":…}
  *     {"kind":"finished","signal":{…done-signal…},"spendUsd":N}
  *
  *   engine → worker stdin:
- *     {"kind":"nudge","text":…}
+ *     {"kind":"nudge","steerId":…,"text":…}
+ *
+ * Steering is deterministic, not fire-and-forget: a worker that consumes a
+ * nudge at a safe checkpoint echoes `{"kind":"nudge_ack","steerId":…}` so the
+ * engine can drain the steer from its durable buffer. A worker that never acks
+ * leaves the steer buffered — the engine folds it into the next seat's brief.
  *
  * Before launch the adapter writes the §6.4 stage manifest to
  * `.beckett/stage-manifest.json` and the brief to `.beckett/brief.md` in
@@ -212,11 +218,13 @@ export class ProcessSpawnAdapter implements SpawnAdapter {
 
     return {
       seatKey: request.seatKey,
-      nudge: (text: string) => {
+      nudge: (text: string, steerId?: string) => {
         if (proc.child.exitCode != null || proc.aborted) return { receipt: "dropped" as const };
         try {
-          proc.child.stdin.write(JSON.stringify({ kind: "nudge", text }) + "\n");
-          return { receipt: "delivered" as const };
+          proc.child.stdin.write(
+            JSON.stringify({ kind: "nudge", ...(steerId !== undefined ? { steerId } : {}), text }) + "\n",
+          );
+          return { receipt: "delivered" as const, ...(steerId !== undefined ? { steerId } : {}) };
         } catch (err) {
           this.enqueue(key, proc, {
             kind: "error",
@@ -390,6 +398,10 @@ export function coerceWorkerEvent(data: unknown): WorkerEvent | null {
     }
     case "file_change":
       return typeof ev["path"] === "string" ? { kind: "file_change", path: ev["path"] } : null;
+    case "nudge_ack":
+      return typeof ev["steerId"] === "string"
+        ? { kind: "nudge_ack", steerId: ev["steerId"] }
+        : null;
     case "checkpoint":
       return typeof ev["sha"] === "string" ? { kind: "checkpoint", sha: ev["sha"] } : null;
     case "finished": {

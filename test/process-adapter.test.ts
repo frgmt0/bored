@@ -72,13 +72,14 @@ if (mode === "hang-with-child" || mode === "die-with-child") {
   return;
 }
 if (mode === "hang-for-nudge") {
-  // wait for a nudge on stdin, echo it into the summary, then finish
+  // wait for a nudge on stdin, acknowledge it, echo it into the summary, finish
   let buf = "";
   process.stdin.on("data", (c) => {
     buf += c.toString();
     const line = buf.split("\\n")[0];
     if (!line) return;
     const msg = JSON.parse(line);
+    if (msg.steerId) emit({ kind: "nudge_ack", steerId: msg.steerId }); // confirm pickup
     emit({ kind: "turn_completed", turn: 1, toolCalls: 1, tokens: { input: 10, output: 5 } });
     emit({ kind: "finished", signal: { status: "complete", summary: "heard: " + msg.text, filesChanged: [], checksRun: null, blockedReason: null }, spendUsd: 0.01 });
     process.exit(0);
@@ -212,6 +213,7 @@ describe("ProcessSpawnAdapter — a real child process runs the work", () => {
     );
     const receipt = rig.engine.nudge("#p4", "prefer approach B");
     expect(receipt.receipt).toBe("delivered");
+    expect(receipt.steerId).toBeDefined();
     await waitFor(() => rig.engine.status("#p4").status === "done", "nudged worker to finish");
     const signal = rig.engine.store
       .readEvents("#p4")
@@ -219,6 +221,13 @@ describe("ProcessSpawnAdapter — a real child process runs the work", () => {
     expect((signal as { signal: { summary: string } }).signal.summary).toBe(
       "heard: prefer approach B",
     );
+    // The worker acked the steer over stdin → the engine recorded it and the
+    // durable buffer drained: injection was confirmed, not fire-and-forget.
+    const acked = rig.engine.store
+      .readEvents("#p4")
+      .find((e) => e.type === "nudge_acked");
+    expect(acked).toMatchObject({ steerId: receipt.steerId });
+    expect(rig.engine.status("#p4").pendingSteers).toHaveLength(0);
   });
 
   it("reaps a worker process group and records WIP + an abort reason", async () => {

@@ -232,10 +232,11 @@ switch (command) {
   }
   case "nudge": {
     const text = argv[2];
-    if (!target || !text) fail('usage: run-of-show nudge <ref> "text" [--node N]');
+    if (!target || !text) fail('usage: run-of-show nudge <ref> "text" [--node N] [--interrupt]');
     void api("POST", refPath(target, "nudge"), {
       text,
       ...(arg("--node") !== undefined ? { node: arg("--node") } : {}),
+      ...(has("--interrupt") ? { mode: "interrupt" } : {}),
     }).then((d) => console.log(JSON.stringify(d)));
     break;
   }

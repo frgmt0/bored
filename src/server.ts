@@ -9,7 +9,7 @@
  *   POST /tickets                      → file (FileTicketInput body)
  *   GET  /tickets/:ref                 → TicketStatus (ticket + run + deps)
  *   POST /tickets/:ref/staff           → open the run for a todo ticket
- *   POST /tickets/:ref/nudge           → {text, node?}
+ *   POST /tickets/:ref/nudge           → {text, node?, mode?: enqueue|interrupt}
  *   POST /tickets/:ref/pause
  *   POST /tickets/:ref/resume          → {grant?}
  *   POST /tickets/:ref/gate            → {node, verdict, note?}
@@ -118,12 +118,19 @@ export class TrackerServer {
           return send(res, 200, { ticket: await this.tracker.staff(ref) });
         case "nudge": {
           if (typeof body["text"] !== "string") return send(res, 400, { error: "text required" });
-          const receipt = this.tracker.nudge(
-            ref,
-            body["text"],
-            typeof body["node"] === "string" ? body["node"] : undefined,
-          );
-          return send(res, 200, { receipt: receipt.receipt });
+          const mode = body["mode"];
+          if (mode !== undefined && mode !== "enqueue" && mode !== "interrupt") {
+            return send(res, 400, { error: 'mode must be "enqueue" or "interrupt"' });
+          }
+          const node = typeof body["node"] === "string" ? body["node"] : undefined;
+          const receipt =
+            mode === "interrupt"
+              ? await this.tracker.interrupt(ref, body["text"], node)
+              : this.tracker.nudge(ref, body["text"], node);
+          return send(res, 200, {
+            receipt: receipt.receipt,
+            ...(receipt.steerId ? { steerId: receipt.steerId } : {}),
+          });
         }
         case "pause":
           return send(res, 200, { ticket: await this.tracker.pause(ref) });

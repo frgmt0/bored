@@ -200,48 +200,114 @@ export class StageManager {
     return this.fold(ref);
   }
 
-  /** Steering — a first-class verb (§5.5). */
+  /**
+   * Steering — a first-class verb (§5.5). Injecting context into a running
+   * agent is deterministic, never fire-and-forget.
+   *
+   * `nudge` is the *enqueue* mode: the steer is durably buffered (so it is
+   * guaranteed to reach the run) and, if a worker is live for the target node,
+   * also handed to it best-effort over the wire. A live worker that picks it up
+   * emits a `nudge_ack`, which drains the buffer; a worker that ignores it,
+   * dies, or retries leaves the steer buffered, so it folds into the next
+   * seat's brief. Either way the steer lands exactly where it can — never
+   * silently skipped, never lost past the run. The in-flight seat keeps
+   * running; use {@link interrupt} to apply the steer to the *current* work now.
+   *
+   * `node` narrows the live hand-off to one node; when omitted every live seat
+   * is addressed.
+   */
   nudge(ref: string, text: string, node?: NodeId): NudgeReceipt {
     const run = this.fold(ref);
+    if (run.status === "done" || run.status === "cancelled") {
+      throw new Error(`run ${ref} is ${run.status}; cannot steer a finished run`);
+    }
     const live = this.liveSeatsOf(ref).filter(
       (s) => node == null || s.request.node === node,
     );
+    // A stable, deterministic id: the seq the buffering event will carry. On
+    // recovery the id is read back from the log, never regenerated.
+    const steerId = `s${run.lastSeq + 1}`;
+
     if (live.length === 0) {
       this.append(ref, {
         type: "nudge_delivered",
         receipt: "queued",
         text,
+        steerId,
         ...(node != null ? { node } : {}),
       });
-      return { receipt: "queued" };
+      return { receipt: "queued", steerId, buffered: true };
     }
     let last: NudgeReceipt = { receipt: "dropped" };
     let landed = false;
     for (const seat of live) {
-      last = seat.handle.nudge(text);
-      if (last.receipt !== "dropped") landed = true;
+      const r = seat.handle.nudge(text, steerId);
+      if (r.receipt !== "dropped") landed = true;
       this.append(ref, {
         type: "nudge_delivered",
-        receipt: last.receipt,
+        receipt: r.receipt,
         target: seat.request.seatKey,
         ...(node != null ? { node } : {}),
         text,
+        steerId,
       });
+      last = r;
     }
     // Every targeted seat dropped it — the worker(s) were reaped between the
     // registry lookup and the write (the child had already exited). Buffer
-    // the steer so the replacement seat picks it up instead of losing it.
+    // the steer (with its steerId, so buffer dedup stays consistent) so the
+    // replacement seat picks it up instead of losing it.
     if (!landed) {
       this.append(ref, {
         type: "nudge_delivered",
         receipt: "queued",
         text,
+        steerId,
         ...(node != null ? { node } : {}),
       });
-      return { receipt: "queued" };
+      return { receipt: "queued", steerId, buffered: true };
     }
-    void run;
-    return last;
+    return { ...last, steerId, buffered: true };
+  }
+
+  /**
+   * Steering — the *interrupt* mode: buffer the steer, then stop the in-flight
+   * seat(s) for the target node (WIP is committed on abort) and let reconcile
+   * re-staff the same visit at the next attempt, folding the just-buffered
+   * steer into a fresh brief. Immediate, deterministic application to the
+   * current node's work; no retry cap is burned and the run never leaves
+   * `running`. With no live seat this degrades to {@link nudge}'s queued path.
+   */
+  async interrupt(ref: string, text: string, node?: NodeId): Promise<NudgeReceipt> {
+    const run = this.fold(ref);
+    if (run.status === "done" || run.status === "cancelled") {
+      throw new Error(`run ${ref} is ${run.status}; cannot steer a finished run`);
+    }
+    const live = this.liveSeatsOf(ref).filter(
+      (s) => node == null || s.request.node === node,
+    );
+    const steerId = `s${run.lastSeq + 1}`;
+    // Buffer first so the re-staffed seat is guaranteed to carry the steer,
+    // even if the interrupt races a natural finish. `node` rides along so the
+    // steer only folds into that node's next seat (§5.5 routing).
+    this.append(ref, {
+      type: "nudge_delivered",
+      receipt: "queued",
+      text,
+      steerId,
+      ...(node != null ? { node } : {}),
+    });
+    if (live.length === 0) return { receipt: "queued", steerId, buffered: true };
+    this.suppressAdvance.add(ref);
+    try {
+      for (const seat of live) {
+        await this.abortSeat(ref, seat.request.seatKey, `steer interrupt (${steerId}): ${text}`);
+      }
+    } finally {
+      this.suppressAdvance.delete(ref);
+    }
+    await this.reconcile(ref);
+    return { receipt: "will-restart", steerId, buffered: true };
   }
 
   async pause(ref: string): Promise<void> {
@@ -385,6 +451,15 @@ export class StageManager {
       case "file_change":
       case "stalled":
         return; // in-memory lease state; the Sentinel's sweep rolls it up
+      case "nudge_ack": {
+        // The worker confirms it applied a buffered steer. Drain it so it is
+        // not also folded into a later seat's brief. Idempotent: acking an
+        // unknown/already-drained id is a no-op in the fold.
+        if (run.pendingSteers.some((s) => s.id === ev.steerId)) {
+          this.append(ref, { type: "nudge_acked", steerId: ev.steerId, seatKey });
+        }
+        return;
+      }
       case "error":
         this.append(ref, {
           type: "error_recorded",
@@ -1370,7 +1445,9 @@ export class StageManager {
         priorArtifacts,
         // Only steers addressed to this node (or to no node in particular)
         // fold into the brief — the same predicate the fold drains on, so
-        // what this seat reads is exactly what leaves the buffer (§5.5).
+        // what this seat reads is exactly what leaves the buffer (§5.5). The
+        // internal steerId stays in the buffer; the brief carries only the
+        // text and timestamp the seat reads.
         steers: run.pendingSteers
           .filter((s) => s.node == null || s.node === node)
           .map((s) => ({ text: s.text, at: s.at })),

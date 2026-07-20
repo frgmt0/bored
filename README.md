@@ -87,6 +87,8 @@ npx run-of-show file --title "prefs UI" --needs "#1"     # promotes when #1 is d
 npx run-of-show board
 npx run-of-show gate "#1" --node design_review --verdict pass
 npx run-of-show nudge "#1" "prefer the small fix" --node implement
+# apply the steer to the *current* in-flight work now (abort+re-staff):
+npx run-of-show nudge "#1" "stop — requirements changed" --node implement --interrupt
 ```
 
 A worker is any executable: it gets `BECKETT_MANIFEST` (the §6.4 stage
@@ -165,7 +167,8 @@ await engine.tick();
 // on boot:
 await engine.recoverAll();
 // operator verbs:
-engine.nudge("#42.1", "prefer the small fix", "implement");
+engine.nudge("#42.1", "prefer the small fix", "implement");       // enqueue
+await engine.interrupt("#42.1", "requirements changed", "implement"); // apply now
 await engine.decideHumanGate("#42.1", "design_review", "pass");
 await engine.pause("#42.1"); await engine.resume("#42.1", { extraVisits: 1 });
 ```
@@ -265,3 +268,23 @@ Deliberate implementation choices, all documented in-code:
   hard backstop kill pages; ready-timeout and refusals ride the same ladder.
 - **Grants are per-node**: resuming a cap-exhaustion park with `extraVisits`
   arms the parked node only; each cap needs its own authority.
+- **Mid-run context injection is deterministic, not fire-and-forget (§5.5)**.
+  Injecting / interrupting / adding context to a running agent is a first-class
+  operation with two explicit modes:
+  - **enqueue** (`nudge`): the steer is durably buffered *and* handed to the
+    live worker best-effort over the wire. A worker that picks it up echoes a
+    `nudge_ack` (which drains the buffer); a worker that ignores it, dies, or
+    retries leaves the steer buffered, so it folds into the *next* seat's brief.
+    The steer is therefore never silently skipped and never lost past the run —
+    it lands either on the running worker (confirmed by ack) or, at latest, on
+    the run's next seat. The in-flight seat keeps running.
+  - **interrupt** (`interrupt`): the steer is buffered, the in-flight seat is
+    aborted with a WIP checkpoint, and the *same visit* is re-staffed (next
+    attempt, no retry cap burned) with the steer folded into a fresh brief —
+    immediate, deterministic application to the current node's work, and the run
+    never leaves `running`.
+
+  Every steer carries a stable id so its delivery is auditable end-to-end
+  (`nudge_delivered` → `nudge_acked`); the buffer survives an engine reboot
+  because it is a fold of the persisted log. The Sentinel's liveness pokes are
+  *not* steers — they carry no id and never fold into a brief.

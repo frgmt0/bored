@@ -231,6 +231,12 @@ export class Tracker {
     return this.engine.nudge(ref, text, node);
   }
 
+  /** Steer the in-flight seat now: abort with WIP, re-staff with the steer. */
+  async interrupt(ref: string, text: string, node?: string): Promise<NudgeReceipt> {
+    this.assertStaffed(ref);
+    return this.engine.interrupt(ref, text, node);
+  }
+
   async pause(ref: string): Promise<Ticket> {
     this.assertStaffed(ref);
     await this.engine.pause(ref);
@@ -333,6 +339,7 @@ export class Tracker {
   private hookActions(ref: string): HookActions {
     return {
       nudge: (text, node) => this.nudge(ref, text, node),
+      interrupt: (text, node) => this.interrupt(ref, text, node),
       pause: async () => {
         await this.pause(ref);
       },
