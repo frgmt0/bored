@@ -36,6 +36,8 @@ function fakeSha(seed: string): string {
  */
 export class SimSeat {
   readonly nudges: string[] = [];
+  /** steers handed to this seat with their ids, in delivery order */
+  readonly steers: Array<{ text: string; steerId?: string }> = [];
   aborted?: { reason: string };
   finishedEmitted = false;
   private turns = 0;
@@ -55,10 +57,11 @@ export class SimSeat {
   get handle(): WorkerHandle {
     return {
       seatKey: this.request.seatKey,
-      nudge: (text: string): NudgeReceipt => {
+      nudge: (text: string, steerId?: string): NudgeReceipt => {
         if (this.finishedEmitted || this.aborted) return { receipt: "dropped" };
         this.nudges.push(text);
-        return { receipt: "delivered" };
+        this.steers.push({ text, ...(steerId !== undefined ? { steerId } : {}) });
+        return { receipt: "delivered", ...(steerId !== undefined ? { steerId } : {}) };
       },
       abort: async (reason: string): Promise<string> => {
         this.aborted = { reason };
@@ -129,6 +132,16 @@ export class SimSeat {
 
   async stall(): Promise<void> {
     await this.emit({ kind: "stalled" });
+  }
+
+  /**
+   * The worker confirms it applied a steer at a safe checkpoint. Defaults to
+   * the most recently delivered steer's id.
+   */
+  async ackNudge(steerId?: string): Promise<void> {
+    const id = steerId ?? this.steers[this.steers.length - 1]?.steerId;
+    if (id === undefined) throw new Error("no steer to acknowledge");
+    await this.emit({ kind: "nudge_ack", steerId: id });
   }
 
   async finish(signal: DoneSignal | null, opts: { error?: string; spendUsd?: number } = {}): Promise<void> {

@@ -87,7 +87,9 @@ export function traceLine(ev: RunEvent): string {
     case "alarm_cleared":
       return `alarm ${ev.alarmType} cleared${ev.seatKey ? ` on ${ev.seatKey}` : ""}`;
     case "nudge_delivered":
-      return `nudge ${ev.receipt}${ev.target ? ` to ${ev.target}` : ""}: ${ev.text}`;
+      return `nudge ${ev.receipt}${ev.target ? ` to ${ev.target}` : ""}${ev.steerId ? ` [${ev.steerId}]` : ""}: ${ev.text}`;
+    case "nudge_acked":
+      return `steer ${ev.steerId} acknowledged${ev.seatKey ? ` by ${ev.seatKey}` : ""}`;
     case "parked":
       return `PARKED (${ev.reason}${ev.node ? ` at ${ev.node}` : ""})${ev.detail ? ` — ${ev.detail}` : ""}`;
     case "resumed":

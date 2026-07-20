@@ -58,7 +58,10 @@ export interface FlowScriptContext {
 
 /** Everything a hook may do — a scripted concierge's operator verbs. */
 export interface HookActions {
+  /** enqueue a steer (buffer + best-effort live hand-off) */
   nudge(text: string, node?: string): NudgeReceipt;
+  /** interrupt the in-flight seat and re-staff it with the steer applied */
+  interrupt(text: string, node?: string): Promise<NudgeReceipt>;
   pause(): Promise<void>;
   resume(grant?: ResumeGrant): Promise<void>;
   decideGate(node: string, verdict: "pass" | "fail", note?: string): Promise<void>;

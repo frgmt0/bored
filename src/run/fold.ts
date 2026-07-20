@@ -107,8 +107,8 @@ export interface FlowRun {
   seats: Record<SeatKey, SeatState>;
   joins: Record<NodeId, JoinState>;
   grants: Grants;
-  /** buffered steering waiting for the next seat (§5.5) */
-  pendingSteers: Array<{ text: string; at: string }>;
+  /** buffered steering waiting for the next seat (§5.5), keyed by steer id */
+  pendingSteers: Array<{ id: string; text: string; at: string }>;
   /** alarms currently standing (raised, not yet cleared) */
   activeAlarms: Alarm[];
   openedAt: string;
@@ -322,9 +322,21 @@ export function applyEvent(run: FlowRun, ev: RunEvent): FlowRun {
       break;
     }
     case "nudge_delivered": {
-      if (ev.receipt === "queued") {
-        run.pendingSteers.push({ text: ev.text, at: ev.at });
+      // Every operator/concierge steer (one carrying a steerId) is durably
+      // buffered — whether it was queued or handed live to a worker — so it is
+      // guaranteed to reach the run: an ack drains it, otherwise it folds into
+      // the next seat's brief. Dedup by id: one logical steer fanned out to
+      // several live seats buffers once. Sentinel pokes carry no id and are
+      // never buffered.
+      if (ev.steerId != null && !run.pendingSteers.some((s) => s.id === ev.steerId)) {
+        run.pendingSteers.push({ id: ev.steerId, text: ev.text, at: ev.at });
       }
+      break;
+    }
+    case "nudge_acked": {
+      // A live worker confirmed it applied the steer — drop it from the buffer
+      // so it does not also fold into a later seat's brief.
+      run.pendingSteers = run.pendingSteers.filter((s) => s.id !== ev.steerId);
       break;
     }
     case "parked": {
