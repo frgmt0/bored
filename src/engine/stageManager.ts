@@ -207,18 +207,38 @@ export class StageManager {
       (s) => node == null || s.request.node === node,
     );
     if (live.length === 0) {
-      this.append(ref, { type: "nudge_delivered", receipt: "queued", text });
+      this.append(ref, {
+        type: "nudge_delivered",
+        receipt: "queued",
+        text,
+        ...(node != null ? { node } : {}),
+      });
       return { receipt: "queued" };
     }
     let last: NudgeReceipt = { receipt: "dropped" };
+    let landed = false;
     for (const seat of live) {
       last = seat.handle.nudge(text);
+      if (last.receipt !== "dropped") landed = true;
       this.append(ref, {
         type: "nudge_delivered",
         receipt: last.receipt,
         target: seat.request.seatKey,
+        ...(node != null ? { node } : {}),
         text,
       });
+    }
+    // Every targeted seat dropped it — the worker(s) were reaped between the
+    // registry lookup and the write (the child had already exited). Buffer
+    // the steer so the replacement seat picks it up instead of losing it.
+    if (!landed) {
+      this.append(ref, {
+        type: "nudge_delivered",
+        receipt: "queued",
+        text,
+        ...(node != null ? { node } : {}),
+      });
+      return { receipt: "queued" };
     }
     void run;
     return last;
@@ -1348,7 +1368,12 @@ export class StageManager {
         ...(nodeBrief !== undefined ? { nodeBrief } : {}),
         ...(rubric !== undefined ? { rubric } : {}),
         priorArtifacts,
-        steers: run.pendingSteers.map((s) => ({ text: s.text, at: s.at })),
+        // Only steers addressed to this node (or to no node in particular)
+        // fold into the brief — the same predicate the fold drains on, so
+        // what this seat reads is exactly what leaves the buffer (§5.5).
+        steers: run.pendingSteers
+          .filter((s) => s.node == null || s.node === node)
+          .map((s) => ({ text: s.text, at: s.at })),
       },
       manifest,
       envelope,

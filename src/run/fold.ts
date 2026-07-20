@@ -107,8 +107,12 @@ export interface FlowRun {
   seats: Record<SeatKey, SeatState>;
   joins: Record<NodeId, JoinState>;
   grants: Grants;
-  /** buffered steering waiting for the next seat (§5.5) */
-  pendingSteers: Array<{ text: string; at: string }>;
+  /**
+   * buffered steering waiting for the next seat (§5.5). `node` records the
+   * seat a steer was addressed to so it is only delivered to that node's
+   * next seat; an undefined `node` folds into whatever seat spawns next.
+   */
+  pendingSteers: Array<{ text: string; at: string; node?: NodeId }>;
   /** alarms currently standing (raised, not yet cleared) */
   activeAlarms: Alarm[];
   openedAt: string;
@@ -221,8 +225,13 @@ export function applyEvent(run: FlowRun, ev: RunEvent): FlowRun {
         cursor.seatKey = ev.seatKey;
         cursor.branch = ev.branch;
       }
-      // Buffered steering folds into the next worker's brief and is drained.
-      run.pendingSteers = [];
+      // Buffered steering folds into the next worker's brief and is drained —
+      // but only the steers addressed to this node (or to no node in
+      // particular). A steer aimed at a different node stays buffered so it
+      // reaches that node's seat, not this one (§5.5 routing).
+      run.pendingSteers = run.pendingSteers.filter(
+        (s) => s.node != null && s.node !== ev.node,
+      );
       break;
     }
     case "worker_ready": {
@@ -323,7 +332,11 @@ export function applyEvent(run: FlowRun, ev: RunEvent): FlowRun {
     }
     case "nudge_delivered": {
       if (ev.receipt === "queued") {
-        run.pendingSteers.push({ text: ev.text, at: ev.at });
+        run.pendingSteers.push({
+          text: ev.text,
+          at: ev.at,
+          ...(ev.node != null ? { node: ev.node } : {}),
+        });
       }
       break;
     }

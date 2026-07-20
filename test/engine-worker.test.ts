@@ -215,6 +215,56 @@ describe("steering (§5.5)", () => {
     // and the buffer drained
     expect(rig.engine.status("#11").pendingSteers).toHaveLength(0);
   });
+
+  it("a node-targeted steer never leaks into a different node's seat", async () => {
+    // Routing correctness: a steer addressed to node A that is buffered
+    // because A has no live seat must not fold into the next seat of a
+    // different node B — it stays buffered until A's seat spawns.
+    const rig = makeRig();
+    await rig.engine.open("#18", presets.reviewedLifecycle(), { body: "b" });
+    const impl1 = rig.adapter.seat("implement", { attempt: 1 });
+    await impl1.ready();
+    // addressed to the review gate, which has no live seat yet → buffered
+    const receipt = rig.engine.nudge("#18", "reviewer: weight the perf criterion", "review");
+    expect(receipt.receipt).toBe("queued");
+    // implement crashes and a retry seat spawns before review ever runs
+    await impl1.crash("OOM");
+    const impl2 = rig.adapter.seat("implement", { attempt: 2 });
+    expect(impl2.request.briefParts.steers.map((s) => s.text)).not.toContain(
+      "reviewer: weight the perf criterion",
+    );
+    // still buffered, waiting for the review seat
+    expect(rig.engine.status("#18").pendingSteers).toHaveLength(1);
+    // and it reaches review when that seat finally spawns
+    await impl2.ready();
+    await impl2.complete();
+    const review = rig.adapter.seat("review");
+    expect(review.request.briefParts.steers.map((s) => s.text)).toContain(
+      "reviewer: weight the perf criterion",
+    );
+    expect(rig.engine.status("#18").pendingSteers).toHaveLength(0);
+  });
+
+  it("re-buffers a steer that a reaped seat drops so the next seat still gets it", async () => {
+    // The registry still lists a seat whose child has already exited: its
+    // handle drops nudges. The steer must not be lost — it re-buffers for
+    // the replacement seat instead of vanishing.
+    const rig = makeRig();
+    await rig.engine.open("#19", presets.onePass(), { body: "b" });
+    const seat1 = rig.adapter.seat("implement", { attempt: 1 });
+    await seat1.ready();
+    // child exited; the finished event has not been processed yet
+    seat1.finishedEmitted = true;
+    const receipt = rig.engine.nudge("#19", "use approach B", "implement");
+    expect(receipt.receipt).toBe("queued");
+    expect(rig.engine.status("#19").pendingSteers.map((s) => s.text)).toContain(
+      "use approach B",
+    );
+    // the crash lands, a retry seat spawns and carries the steer
+    await seat1.crash("died after exit");
+    const seat2 = rig.adapter.seat("implement", { attempt: 2 });
+    expect(seat2.request.briefParts.steers.map((s) => s.text)).toContain("use approach B");
+  });
 });
 
 describe("pause / resume / cancel", () => {
