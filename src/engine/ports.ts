@@ -14,14 +14,14 @@ export interface TokenUsage {
 }
 
 /**
- * A single steer — context injected into a run. Every steer carries a stable
- * `id` so its delivery can be tracked end-to-end: buffered → handed to a live
- * worker → acknowledged (drained) or folded into the next seat's brief. The
- * id is what makes mid-run injection deterministic instead of fire-and-forget
- * (§5.5).
+ * A single steer as it folds into a seat's brief — the injected context the
+ * worker actually reads. The steer's stable `id` (which makes mid-run
+ * injection deterministic rather than fire-and-forget, §5.5) is tracked in the
+ * run's buffer (`pendingSteers`) for dedup and ack draining; it is internal
+ * and does not ride into the brief, so a folded steer carries only its text
+ * and timestamp.
  */
 export interface Steer {
-  id: string;
   text: string;
   at: string;
 }
