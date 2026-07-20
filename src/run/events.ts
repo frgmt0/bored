@@ -160,6 +160,8 @@ export interface RunEventPayloads {
   nudge_delivered: {
     receipt: "delivered" | "queued" | "will-restart" | "dropped";
     target?: SeatKey;
+    /** the node the steer was addressed to; undefined = any live seat */
+    node?: NodeId;
     text: string;
   };
   /** run handed to a human */
