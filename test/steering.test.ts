@@ -41,14 +41,16 @@ describe("mid-run injection — enqueue (nudge)", () => {
     expect(eventTypes(rig, "#s1")).toContain("nudge_acked");
   });
 
-  it("a steer the running worker never acks is not lost — it folds into the next seat's brief", async () => {
+  it("a run-wide steer the running worker never acks is not lost — it folds into the next seat's brief", async () => {
     const rig = makeRig();
     await rig.engine.open("#s2", presets.reviewedLifecycle(), { body: "b" });
     const seat = rig.adapter.seat("implement");
     await seat.ready();
 
-    // Deliver to the live worker, but the worker barrels past without acking.
-    const receipt = rig.engine.nudge("#s2", "watch the auth edge case", "implement");
+    // A run-wide steer (no node) is delivered to every live worker, but the
+    // worker barrels past without acking. Addressed to no node in particular,
+    // it folds into whatever seat spawns next.
+    const receipt = rig.engine.nudge("#s2", "watch the auth edge case");
     expect(receipt.receipt).toBe("delivered");
     expect(rig.engine.status("#s2").pendingSteers).toHaveLength(1);
 
@@ -64,7 +66,7 @@ describe("mid-run injection — enqueue (nudge)", () => {
     expect(rig.engine.status("#s2").pendingSteers).toHaveLength(0);
   });
 
-  it("buffers when no seat is live and survives an engine reboot (durable)", async () => {
+  it("buffers when no seat is live and keeps node routing across an engine reboot (durable)", async () => {
     const rig = makeRig();
     await rig.engine.open("#s3", presets.reviewedLifecycle(), { body: "b" });
     const seat = rig.adapter.seat("implement");
@@ -76,16 +78,21 @@ describe("mid-run injection — enqueue (nudge)", () => {
     expect(receipt.buffered).toBe(true);
 
     // Reboot the engine over the same store: the buffer rebuilds from the log
-    // alone (a fold of the persisted nudge_delivered event).
+    // alone (a fold of the persisted nudge_delivered event), node and all.
     const rebooted = rebootRig(rig);
     expect(rebooted.engine.status("#s3").pendingSteers.map((s) => s.text)).toContain(
       "when you rework, use approach B",
     );
 
-    // And recovery applies it: the re-staffed seat's brief carries the steer.
+    // The steer was addressed to `implement`, so node routing survives the
+    // reboot: the re-staffed review seat does NOT pick it up, and it stays
+    // buffered for implement's next seat rather than leaking into the wrong one.
     await rebooted.engine.recoverAll();
     const restaffed = rebooted.adapter.seat("review");
-    expect(restaffed.request.briefParts.steers.map((s) => s.text)).toContain(
+    expect(restaffed.request.briefParts.steers.map((s) => s.text)).not.toContain(
+      "when you rework, use approach B",
+    );
+    expect(rebooted.engine.status("#s3").pendingSteers.map((s) => s.text)).toContain(
       "when you rework, use approach B",
     );
   });
